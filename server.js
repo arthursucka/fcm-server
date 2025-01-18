@@ -27,17 +27,18 @@ app.post("/send-notification", async (req, res) => {
     });
   }
 
-  // Configuração da mensagem
-  const message = {
-    notification: {
-      title,
-      body,
-    },
-    data: {
-      ...data, // Inclui os campos 'data', 'hora', 'local' enviados no corpo da requisição
-    },
-    topic,
-  };
+  /// Configuração da mensagem
+const message = {
+  notification: {
+    title,
+    body,
+  },
+  data: {
+    ...data, // Inclui os campos 'churrascoDate', 'hora', 'local', etc., enviados no corpo da requisição
+    fornecidos: data.fornecidos?.join(",") || "", // Adiciona os itens fornecidos como uma string separada por vírgulas
+  },
+  topic,
+};
 
   try {
     // Envia a notificação usando a API HTTP v1
