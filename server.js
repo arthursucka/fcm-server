@@ -20,10 +20,10 @@ app.post("/send-notification", async (req, res) => {
   const { topic, title, body, data } = req.body;
 
   // Validação do payload
-  if (!topic || !title || !body) {
+  if (!topic || !title || !body || !data) {
     return res.status(400).send({
       success: false,
-      message: "Payload inválido. Certifique-se de enviar 'topic', 'title' e 'body'.",
+      message: "Payload inválido. Certifique-se de enviar 'topic', 'title', 'body' e 'data'.",
     });
   }
 
@@ -33,7 +33,9 @@ app.post("/send-notification", async (req, res) => {
       title,
       body,
     },
-    data: data || {}, // Dados adicionais (opcional)
+    data: {
+      ...data, // Inclui os campos 'data', 'hora', 'local' enviados no corpo da requisição
+    },
     topic,
   };
 
