@@ -23,6 +23,9 @@ app.use(cors({
 app.post("/send-notification", async (req, res) => {
   const { topic, title, body, data } = req.body;
 
+  // Log do payload recebido
+  console.log("Payload recebido no backend:", req.body);
+
   // Validação do payload
   if (!topic || !title || !body || !data) {
     return res.status(400).send({
@@ -44,6 +47,9 @@ const message = {
   topic,
 };
 
+ // Log da mensagem configurada
+ console.log("Mensagem configurada para envio ao Firebase:", message);
+ 
   try {
     // Envia a notificação usando a API HTTP v1
     const response = await admin.messaging().send(message);
