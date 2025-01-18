@@ -3,6 +3,11 @@ const admin = require("firebase-admin");
 const express = require("express");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+app.use(cors({
+  origin: "*", // Permite todas as origens. Substitua "*" por URLs específicas, se necessário.
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 
 // Inicializa o Firebase Admin SDK
 const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
