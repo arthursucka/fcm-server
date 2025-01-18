@@ -5,7 +5,7 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 
 // Inicializa o Firebase Admin SDK
-const serviceAccount = require('C:/Users/arthu/fcm-server/serviceAccountKey.json');
+const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
