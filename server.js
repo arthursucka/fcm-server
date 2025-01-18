@@ -42,7 +42,9 @@ const message = {
   },
   data: {
     ...data, // Inclui os campos 'churrascoDate', 'hora', 'local', etc., enviados no corpo da requisição
-    fornecidos: data.fornecidos?.join(",") || "", // Adiciona os itens fornecidos como uma string separada por vírgulas
+    fornecidos: Array.isArray(data.fornecidos) && data.fornecidos.length > 0 
+    ? data.fornecidos.join(",") 
+    : "Nenhum item fornecido"
   },
   topic,
 };
