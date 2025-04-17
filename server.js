@@ -21,7 +21,7 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
-// Endpoint para enviar notificação via FCM
+// Endpoint para enviar notificação via FCM (data-only)
 app.post("/send-notification", async (req, res) => {
   const { topic, title, body, data } = req.body;
 
@@ -34,20 +34,21 @@ app.post("/send-notification", async (req, res) => {
     });
   }
 
+  // Monta a mensagem apenas com data (sem a chave 'notification')
   const message = {
-    notification: { title, body },
     data: {
-      evento:            String(data.evento            || ""),
-      churrascoDate:     String(data.churrascoDate     || ""),
-      hora:              String(data.hora              || ""),
-      local:             String(data.local             || ""),
-      fornecidos: Array.isArray(data.fornecidos) && data.fornecidos.length > 0
-        ? data.fornecidos.join(",")
-        : (data.fornecidos ? String(data.fornecidos) : "Nenhum item fornecido"),
-      itensNaoFornecidos: Array.isArray(data.itensNaoFornecidos) && data.itensNaoFornecidos.length > 0
-        ? data.itensNaoFornecidos.join(",")
-        : (data.itensNaoFornecidos ? String(data.itensNaoFornecidos) : "Nenhum item pendente"),
-      id:                String(data.id                || "")
+      title:             String(title),
+      body:              String(body),
+      id:                String(data.id || ""),
+      churrascoDate:     String(data.churrascoDate || ""),
+      hora:               String(data.hora || ""),
+      local:              String(data.local || ""),
+      fornecidos:        Array.isArray(data.fornecidos)
+                           ? data.fornecidos.join(",")
+                           : String(data.fornecidos || ""),
+      itensNaoFornecidos: Array.isArray(data.itensNaoFornecidos)
+                           ? data.itensNaoFornecidos.join(",")
+                           : String(data.itensNaoFornecidos || "")
     },
     topic
   };
@@ -60,8 +61,7 @@ app.post("/send-notification", async (req, res) => {
     console.error("Erro ao enviar notificação:", error);
     return res.status(500).json({ success: false, error: error.message });
   }
-});  // ← não esqueça deste fechamento!
-
+});  // ← certifica-se de fechar o app.post aqui, com parêntese e ponto e vírgula
 
 app.post("/churrascos", (req, res) => {
   const { churrascoDate, hora, local, fornecidos, userName, token } = req.body;
