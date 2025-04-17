@@ -7,7 +7,12 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js"
   },
-  "keywords": ["firebase", "backend", "fcm", "nodejs"],
+  "keywords": [
+    "firebase",
+    "backend",
+    "fcm",
+    "nodejs"
+  ],
   "author": "Seu Nome",
   "license": "MIT",
   "dependencies": {
@@ -15,6 +20,14 @@
     "body-parser": "^1.20.3",
     "cors": "^2.8.5",
     "express": "^4.21.2",
-    "firebase-admin": "^13.0.2"
-  }
+    "firebase-admin": "^13.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arthursucka/fcm-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/arthursucka/fcm-server/issues"
+  },
+  "homepage": "https://github.com/arthursucka/fcm-server#readme"
 }

@@ -5,7 +5,9 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 
 // Inicializa o Firebase Admin SDK
-const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
+// const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
+const serviceAccount = require("./serviceAccountKey.json");
+
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -35,18 +37,23 @@ app.post("/send-notification", async (req, res) => {
   }
 
   /// Configuração da mensagem
-const message = {
-  notification: {
-    title,
-    body,
+  const message = {
+    notification: { title, body },
+    data: {
+    // Campos obrigatórios como strings
+    evento:         String(data.evento || ""),
+    churrascoDate:  String(data.churrascoDate || ""),
+    hora:           String(data.hora || ""),
+    local:          String(data.local || ""),
+    // Converte arrays em CSV; caso contrário, faz cast pra string
+    fornecidos: Array.isArray(data.fornecidos) && data.fornecidos.length > 0
+     ? data.fornecidos.join(",")
+     : (data.fornecidos ? String(data.fornecidos) : "Nenhum item fornecido"),
+  itensNaoFornecidos: Array.isArray(data.itensNaoFornecidos) && data.itensNaoFornecidos.length > 0
+      ? data.itensNaoFornecidos.join(",")
+      : (data.itensNaoFornecidos ? String(data.itensNaoFornecidos) : "Nenhum item pendente")
   },
-  data: {
-    ...data, // Inclui os campos 'churrascoDate', 'hora', 'local', etc., enviados no corpo da requisição
-    fornecidos: Array.isArray(data.fornecidos) && data.fornecidos.length > 0 
-    ? data.fornecidos.join(",") 
-    : "Nenhum item fornecido"
-  },
-  topic,
+  topic
 };
 
  // Log da mensagem configurada
