@@ -21,41 +21,47 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
-// Endpoint para enviar notificação
+// Endpoint para enviar notificação via FCM
 app.post("/send-notification", async (req, res) => {
   const { topic, title, body, data } = req.body;
 
-  // Log do payload recebido
   console.log("Payload recebido no backend:", req.body);
 
-  // Validação do payload
   if (!topic || !title || !body || !data) {
-    return res.status(400).send({
+    return res.status(400).json({
       success: false,
-      message: "Payload inválido. Certifique-se de enviar 'topic', 'title', 'body' e 'data'.",
+      message: "Payload inválido. Certifique-se de enviar 'topic', 'title', 'body' e 'data'."
     });
   }
 
-  /// Configuração da mensagem
   const message = {
     notification: { title, body },
     data: {
-    // Campos obrigatórios como strings
-    evento:         String(data.evento || ""),
-    churrascoDate:  String(data.churrascoDate || ""),
-    hora:           String(data.hora || ""),
-    local:          String(data.local || ""),
-    // Converte arrays em CSV; caso contrário, faz cast pra string
-    fornecidos: Array.isArray(data.fornecidos) && data.fornecidos.length > 0
-     ? data.fornecidos.join(",")
-     : (data.fornecidos ? String(data.fornecidos) : "Nenhum item fornecido"),
-  itensNaoFornecidos: Array.isArray(data.itensNaoFornecidos) && data.itensNaoFornecidos.length > 0
-      ? data.itensNaoFornecidos.join(",")
-      : (data.itensNaoFornecidos ? String(data.itensNaoFornecidos) : "Nenhum item pendente")
+      evento:            String(data.evento            || ""),
+      churrascoDate:     String(data.churrascoDate     || ""),
+      hora:              String(data.hora              || ""),
+      local:             String(data.local             || ""),
+      fornecidos: Array.isArray(data.fornecidos) && data.fornecidos.length > 0
+        ? data.fornecidos.join(",")
+        : (data.fornecidos ? String(data.fornecidos) : "Nenhum item fornecido"),
+      itensNaoFornecidos: Array.isArray(data.itensNaoFornecidos) && data.itensNaoFornecidos.length > 0
+        ? data.itensNaoFornecidos.join(",")
+        : (data.itensNaoFornecidos ? String(data.itensNaoFornecidos) : "Nenhum item pendente"),
+      id:                String(data.id                || "")
     },
-  topic
+    topic
   };
-}
+
+  try {
+    const response = await admin.messaging().send(message);
+    console.log("Mensagem enviada com sucesso:", response);
+    return res.status(200).json({ success: true, response });
+  } catch (error) {
+    console.error("Erro ao enviar notificação:", error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});  // ← não esqueça deste fechamento!
+
 
 app.post("/churrascos", (req, res) => {
   const { churrascoDate, hora, local, fornecidos, userName, token } = req.body;
@@ -141,54 +147,7 @@ app.post("/churrascos/:id/decline-presenca", (req, res) => {
   return res.json({ success:true, message:"Presença recusada" });
 });
 
-// Endpoint para enviar notificação via FCM
-app.post("/send-notification", async (req, res) => {
-  const { topic, title, body, data } = req.body;
-
-  // Log do payload recebido
-  console.log("Payload recebido no backend:", req.body);
-
-  // Validação mínima do payload
-  if (!topic || !title || !body || !data) {
-    return res.status(400).json({
-      success: false,
-      message: "Payload inválido. Certifique-se de enviar 'topic', 'title', 'body' e 'data'."
-    });
-  }
-
-  // Montagem da mensagem para o Firebase
-  const message = {
-    notification: { title, body },
-    data: {
-      // Campos obrigatórios como strings
-      evento:         String(data.evento         || ""),
-      churrascoDate:  String(data.churrascoDate  || ""),
-      hora:           String(data.hora           || ""),
-      local:          String(data.local          || ""),
-      // Converte arrays em CSV; se não for array, converte em string
-      fornecidos: Array.isArray(data.fornecidos) && data.fornecidos.length > 0
-        ? data.fornecidos.join(",")
-        : (data.fornecidos ? String(data.fornecidos) : "Nenhum item fornecido"),
-      itensNaoFornecidos: Array.isArray(data.itensNaoFornecidos) && data.itensNaoFornecidos.length > 0
-        ? data.itensNaoFornecidos.join(",")
-        : (data.itensNaoFornecidos ? String(data.itensNaoFornecidos) : "Nenhum item pendente"),
-      id: String(data.id || "")
-    },
-    topic
-  };
-
-  try {
-    // Envia a notificação
-    const response = await admin.messaging().send(message);
-    console.log("Mensagem enviada com sucesso:", response);
-    return res.status(200).json({ success: true, response });
-  } catch (error) {
-    console.error("Erro ao enviar notificação:", error);
-    return res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Servidor rodando
+ // Servidor rodando
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
