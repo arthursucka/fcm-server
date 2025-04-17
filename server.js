@@ -5,9 +5,7 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 
 // Inicializa o Firebase Admin SDK
-// const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
-const serviceAccount = require("./serviceAccountKey.json");
-
+const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
