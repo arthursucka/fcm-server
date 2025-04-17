@@ -113,11 +113,23 @@ app.get("/churrascos/:id", (req, res) => {
     churrascoDate:   c.churrascoDate,
     hora:            c.hora,
     local:           c.local,
+    createdBy:       c.createdBy,
     fornecidosAgregados: c.fornecidos,
     guestsConfirmed:    c.guestsConfirmed,
     guestsDeclined:     c.guestsDeclined
   });
 });
+
+// DELETE /churrascos/:id — remove o churrasco
+app.delete("/churrascos/:id", (req, res) => {
+  const id = req.params.id;
+  if (!churrascos.has(id)) {
+    return res.status(404).json({ success:false, message:"Churrasco não encontrado" });
+  }
+  churrascos.delete(id);
+  return res.json({ success:true, message:"Churrasco cancelado" });
+});
+
 
 app.post("/churrascos/:id/confirm-presenca", (req, res) => {
   const { name, selectedItems } = req.body;
