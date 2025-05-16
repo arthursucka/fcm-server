@@ -1,166 +1,194 @@
-const { initializeApp } = require('firebase-admin/app');
-const admin = require("firebase-admin");
-const express = require("express");
-const bodyParser = require("body-parser");
-const cors = require("cors");
-const { v4: uuidv4 } = require("uuid");
-const churrascos = new Map();
+require('dotenv').config();
 
-// Inicializa o Firebase Admin SDK
+const express = require('express');
+const mongoose = require('mongoose');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const admin = require('firebase-admin');
+
+// Inicializa Firebase Admin SDK
 const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
-
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
+// Conecta ao MongoDB Atlas
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('MongoDB Atlas conectado!'))
+.catch(err => {
+  console.error('Erro ao conectar MongoDB:', err);
+  process.exit(1);
+});
+
+// Define esquema e modelo Mongoose para "Churrasco"
+const churrascoSchema = new mongoose.Schema({
+  churrascoDate:   { type: String, required: true },
+  hora:            { type: String, required: true },
+  local:           { type: String, required: true },
+  fornecidos:      { type: [String], default: [] },
+  guestsConfirmed: [{ name: String, items: [String] }],
+  guestsDeclined:  { type: [String], default: [] },
+  createdBy:       { type: String, required: true },
+  createdByToken:  { type: String, required: true },
+  createdAt:       { type: Date, default: Date.now },
+});
+const Churrasco = mongoose.model('Churrasco', churrascoSchema);
+
 const app = express();
 app.use(bodyParser.json());
-app.use(cors({
-  origin: "*", // Permite todas as origens. Substitua "*" por URLs específicas, se necessário.
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
+app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'] }));
 
-// Endpoint para enviar notificação via FCM (data-only)
-app.post("/send-notification", async (req, res) => {
-  const { topic, title, body, data } = req.body;
-
-  console.log("Payload recebido no backend:", req.body);
-
-  if (!topic || !title || !body || !data) {
-    return res.status(400).json({
-      success: false,
-      message: "Payload inválido. Certifique-se de enviar 'topic', 'title', 'body' e 'data'."
+// Endpoint para criar churrasco
+app.post('/churrascos', async (req, res) => {
+  try {
+    const { churrascoDate, hora, local, fornecidos, userName, token } = req.body;
+    if (!churrascoDate || !hora || !local || !Array.isArray(fornecidos) || !userName || !token) {
+      return res.status(400).json({ success: false, message: 'Dados incompletos' });
+    }
+    const c = await Churrasco.create({
+      churrascoDate,
+      hora,
+      local,
+      fornecidos,
+      guestsConfirmed: [],
+      guestsDeclined: [],
+      createdBy: userName,
+      createdByToken: token,
     });
+    return res.status(201).json({ success: true, id: c._id });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false, message: e.message });
   }
+});
 
-  // Monta a mensagem apenas com data (sem a chave 'notification')
+// Listar churrascos ativos ou passados
+app.get('/churrascos', async (req, res) => {
+  try {
+    const status = req.query.status;
+    const now = new Date();
+    const all = await Churrasco.find().lean();
+    const filtered = all.filter(c => {
+      const [d, m, y] = c.churrascoDate.split('/').map(Number);
+      const [h, mi] = c.hora.split(':').map(Number);
+      const dateObj = new Date(y, m - 1, d, h, mi);
+      return status === 'active' ? dateObj >= now : dateObj < now;
+    });
+    return res.json({ success: true, churrascos: filtered });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Detalhes de um churrasco
+app.get('/churrascos/:id', async (req, res) => {
+  try {
+    const c = await Churrasco.findById(req.params.id).lean();
+    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    return res.json({
+      success: true,
+      churrascoDate: c.churrascoDate,
+      hora: c.hora,
+      local: c.local,
+      createdBy: c.createdBy,
+      fornecidosAgregados: c.fornecidos,
+      guestsConfirmed: c.guestsConfirmed,
+      guestsDeclined: c.guestsDeclined,
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Confirmar presença
+app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
+  try {
+    const { name, selectedItems } = req.body;
+    const c = await Churrasco.findById(req.params.id);
+    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    if (!name || !Array.isArray(selectedItems)) {
+      return res.status(400).json({ success: false, message: 'Dados inválidos' });
+    }
+    c.guestsConfirmed.push({ name, items: selectedItems });
+    c.fornecidos.push(...selectedItems);
+    await c.save();
+    return res.json({ success: true, message: 'Presença confirmada' });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Recusar presença
+app.post('/churrascos/:id/decline-presenca', async (req, res) => {
+  try {
+    const { name } = req.body;
+    const c = await Churrasco.findById(req.params.id);
+    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    if (!name) {
+      return res.status(400).json({ success: false, message: 'Nome é obrigatório' });
+    }
+    c.guestsDeclined.push(name);
+    await c.save();
+    return res.json({ success: true, message: 'Presença recusada' });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Cancelar churrasco
+app.delete('/churrascos/:id', async (req, res) => {
+  try {
+    const c = await Churrasco.findByIdAndDelete(req.params.id);
+    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    return res.json({ success: true, message: 'Churrasco cancelado' });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Envio de notificação FCM
+app.post('/send-notification', async (req, res) => {
+  const { topic, title, body, data } = req.body;
+  console.log('Payload recebido no backend:', req.body);
+  if (!topic || !title || !body || !data) {
+    return res.status(400).json({ success: false, message: "Payload inválido" });
+  }
   const message = {
+    notification: { title, body },
     data: {
-      title:             String(title),
-      body:              String(body),
-      id:                String(data.id || ""),
-      churrascoDate:     String(data.churrascoDate || ""),
-      hora:               String(data.hora || ""),
-      local:              String(data.local || ""),
-      fornecidos:        Array.isArray(data.fornecidos)
-                           ? data.fornecidos.join(",")
-                           : String(data.fornecidos || ""),
-      itensNaoFornecidos: Array.isArray(data.itensNaoFornecidos)
-                           ? data.itensNaoFornecidos.join(",")
-                           : String(data.itensNaoFornecidos || "")
+      evento:           String(data.evento || ''),
+      churrascoDate:    String(data.churrascoDate || ''),
+      hora:             String(data.hora || ''),
+      local:            String(data.local || ''),
+      fornecidos:       Array.isArray(data.fornecidos) ? data.fornecidos.join(',') : String(data.fornecidos),
+      itensNaoFornecidos: Array.isArray(data.itensNaoFornecidos) ? data.itensNaoFornecidos.join(',') : String(data.itensNaoFornecidos),
     },
-    topic
+    topic,
   };
-
   try {
     const response = await admin.messaging().send(message);
-    console.log("Mensagem enviada com sucesso:", response);
-    return res.status(200).json({ success: true, response });
+    console.log('Mensagem enviada com sucesso:', response);
+    return res.json({ success: true, response });
   } catch (error) {
-    console.error("Erro ao enviar notificação:", error);
+    console.error('Erro ao enviar notificação:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
-});  // ← certifica-se de fechar o app.post aqui, com parêntese e ponto e vírgula
-
-app.post("/churrascos", (req, res) => {
-  const { churrascoDate, hora, local, fornecidos, userName, token } = req.body;
-  if (!churrascoDate || !hora || !local || !Array.isArray(fornecidos) || !userName || !token) {
-    return res.status(400).json({ success:false, message:"Dados incompletos" });
-  }
-  const id = uuidv4();
-  churrascos.set(id, {
-    id,
-    churrascoDate,
-    hora,
-    local,
-    fornecidos: [...fornecidos],     // itens do churrasqueiro
-    guestsConfirmed: [],             // lista de { name, items: [...] }
-    guestsDeclined: [],              // lista de nomes
-    createdBy: userName,
-    createdByToken: token,
-    createdAt: new Date().toISOString()
-  });
-  res.status(201).json({ success: true, id });
 });
 
-app.get("/churrascos", (req, res) => {
-  const status = req.query.status;
-  const now = new Date();
-  const result = [];
-
-  for (const churrasco of churrascos.values()) {
-    // converter "DD/MM/YYYY" para objeto Date
-    const [d, m, y] = churrasco.churrascoDate.split("/").map(Number);
-    const eventDate = new Date(y, m - 1, d, ...churrasco.hora.split(":").map(Number));
-
-    const isPast = eventDate < now;
-    if ((status === "active" && !isPast) || (status === "past" && isPast)) {
-      result.push(churrasco);
-    }
-  }
-
-  res.json({ success: true, churrascos: result });
+// Middleware de log
+app.use((req, res, next) => {
+  console.log(`Requisição recebida: ${req.method} ${req.url}`);
+  console.log('Payload recebido:', req.body);
+  next();
 });
 
-app.get("/churrascos/:id", (req, res) => {
-  const c = churrascos.get(req.params.id);
-  if (!c) return res.status(404).json({ success:false, message:"Churrasco não encontrado" });
-
-  // dados resumidos para envio
-  res.json({
-    success: true,
-    churrascoDate:   c.churrascoDate,
-    hora:            c.hora,
-    local:           c.local,
-    createdBy:       c.createdBy,
-    fornecidosAgregados: c.fornecidos,
-    guestsConfirmed:    c.guestsConfirmed,
-    guestsDeclined:     c.guestsDeclined
-  });
-});
-
-// DELETE /churrascos/:id — remove o churrasco
-app.delete("/churrascos/:id", (req, res) => {
-  const id = req.params.id;
-  if (!churrascos.has(id)) {
-    return res.status(404).json({ success:false, message:"Churrasco não encontrado" });
-  }
-  churrascos.delete(id);
-  return res.json({ success:true, message:"Churrasco cancelado" });
-});
-
-
-app.post("/churrascos/:id/confirm-presenca", (req, res) => {
-  const { name, selectedItems } = req.body;
-  const id = req.params.id;
-  const c = churrascos.get(id);
-  if (!c) return res.status(404).json({ success:false, message:"Churrasco não encontrado" });
-  if (!name || !Array.isArray(selectedItems)) {
-    return res.status(400).json({ success:false, message:"Dados inválidos" });
-  }
-  // adiciona guest confirmado
-  c.guestsConfirmed.push({ name, items: selectedItems });
-  // adiciona itens ao fornecidos agregados
-  c.fornecidos.push(...selectedItems);
-  churrascos.set(id, c);
-  return res.json({ success:true, message:"Presença confirmada" });
-});
-
-app.post("/churrascos/:id/decline-presenca", (req, res) => {
-  const { name } = req.body;
-  const id = req.params.id;
-  const c = churrascos.get(id);
-  if (!c) return res.status(404).json({ success:false, message:"Churrasco não encontrado" });
-  if (!name) return res.status(400).json({ success:false, message:"Nome é obrigatório" });
-
-  c.guestsDeclined.push(name);
-  churrascos.set(id, c);
-  return res.json({ success:true, message:"Presença recusada" });
-});
-
- // Servidor rodando
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
