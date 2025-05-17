@@ -156,23 +156,27 @@ app.delete('/churrascos/:id', async (req, res) => {
 
 // Envio de notificação FCM
 app.post('/send-notification', async (req, res) => {
-  const { topic, title, body, data } = req.body;
-  console.log('Payload recebido no backend:', req.body);
-  if (!topic || !title || !body || !data) {
+  const { to, notification, data } = req.body;
+
+  if (!to || !notification || !notification.title || !notification.body || !data) {
     return res.status(400).json({ success: false, message: "Payload inválido" });
   }
+
   const message = {
-    notification: { title, body },
-    data: {
-      evento:           String(data.evento || ''),
-      churrascoDate:    String(data.churrascoDate || ''),
-      hora:             String(data.hora || ''),
-      local:            String(data.local || ''),
-      fornecidos:       Array.isArray(data.fornecidos) ? data.fornecidos.join(',') : String(data.fornecidos),
-      itensNaoFornecidos: Array.isArray(data.itensNaoFornecidos) ? data.itensNaoFornecidos.join(',') : String(data.itensNaoFornecidos),
+    notification: {
+      title: notification.title,
+      body: notification.body,
     },
-    topic,
+    data: {
+      id: String(data.id || ''),
+      churrascoDate: String(data.churrascoDate || ''),
+      hora: String(data.hora || ''),
+      local: String(data.local || ''),
+      fornecidos: Array.isArray(data.fornecidos) ? data.fornecidos.join(',') : String(data.fornecidos),
+    },
+    topic: to.replace('/topics/', ''),
   };
+
   try {
     const response = await admin.messaging().send(message);
     console.log('Mensagem enviada com sucesso:', response);
@@ -181,13 +185,6 @@ app.post('/send-notification', async (req, res) => {
     console.error('Erro ao enviar notificação:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
-});
-
-// Middleware de log
-app.use((req, res, next) => {
-  console.log(`Requisição recebida: ${req.method} ${req.url}`);
-  console.log('Payload recebido:', req.body);
-  next();
 });
 
 const PORT = process.env.PORT || 3000;
