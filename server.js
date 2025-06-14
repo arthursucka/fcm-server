@@ -139,14 +139,14 @@ app.post('/churrascos', async (req, res) => {
     const tokens = users.flatMap(u => u.fcmTokens);
 
     if (tokens.length) {
-      await admin.messaging().sendMulticast({
-        notification: {
-          title: 'Você foi convidado para um churrasco!',
-          body: `Em ${churrascoDate} às ${hora} no ${local}`
-        },
-        data: { churrascoId: String(c._id) },
-        tokens
-      });
+     await admin.messaging().sendMulticast({
+  tokens,
+  notification: {
+    title: 'Você foi convidado para um churrasco!',
+    body: `Em ${churrascoDate} às ${hora} no ${local}`
+  },
+  data: { churrascoId: String(c._id) }
+});
     }
 
     return res.status(201).json({ success: true, id: String(c._id) });
