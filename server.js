@@ -232,7 +232,7 @@ app.get('/users/:username/invites', authMiddleware, async (req, res) => {
 app.get('/users', authMiddleware, async (req, res) => {
   try {
     const users = await User.find().select('username displayName -_id').lean();
-    return res.json({ success: true, users });
+    return res.json({ success: true, payload: users });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
   }
