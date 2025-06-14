@@ -22,7 +22,7 @@ mongoose.connect(process.env.MONGO_URI, {
     process.exit(1);
   });
 
-// Esquema de Churrasco, agora com invitedUsers :contentReference[oaicite:0]{index=0}:contentReference[oaicite:1]{index=1}
+// Esquema de Churrasco, agora com invitedUsers
 const churrascoSchema = new mongoose.Schema({
   churrascoDate:    { type: String, required: true },
   hora:             { type: String, required: true },
@@ -30,32 +30,33 @@ const churrascoSchema = new mongoose.Schema({
   fornecidos:       { type: [String], default: [] },
   guestsConfirmed:  { type: [{ name: String, items: [String] }], default: [] },
   guestsDeclined:   { type: [String], default: [] },
-  invitedUsers:     { type: [String], default: [] },         // NOVO
+  invitedUsers:     { type: [String], default: [] },
   createdBy:        { type: String, required: true },
   createdAt:        { type: Date, default: Date.now }
 });
-
 const Churrasco = mongoose.model('Churrasco', churrascoSchema);
+
+// Helper para formatar o objeto enviado ao cliente
+function mapChurrasco(c) {
+  return {
+    id:                  String(c._id),
+    churrascoDate:       c.churrascoDate,
+    hora:                c.hora,
+    local:               c.local,
+    createdBy:           c.createdBy,
+    fornecidosAgregados: c.fornecidos,
+    guestsConfirmed:     c.guestsConfirmed,
+    guestsDeclined:      c.guestsDeclined
+  };
+}
 
 const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Helper para normalizar o documento Mongo em JSON para o cliente
-const mapChurrasco = c => ({
-  id:                   String(c._id),
-  churrascoDate:        c.churrascoDate,
-  hora:                 c.hora,
-  local:                c.local,
-  createdBy:            c.createdBy,
-  fornecidosAgregados:  c.fornecidos,
-  guestsConfirmed:      c.guestsConfirmed,
-  guestsDeclined:       c.guestsDeclined
-});
+// ─── ROTAS ────────────────────────────────────────────────────────
 
-// ── ROTAS ─────────────────────────────────────────────────────────
-
-// Cria churrasco e notifica o tópico específico :contentReference[oaicite:2]{index=2}:contentReference[oaicite:3]{index=3}
+// 1) Criar churrasco + notificar tópico
 app.post('/churrascos', async (req, res) => {
   try {
     const { churrascoDate, hora, local, fornecidos, userName, invitedUsers } = req.body;
@@ -64,46 +65,46 @@ app.post('/churrascos', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Dados incompletos' });
     }
 
-    const churrasco = await Churrasco.create({
+    const c = await Churrasco.create({
       churrascoDate, hora, local, fornecidos,
       guestsConfirmed: [], guestsDeclined: [],
       invitedUsers, createdBy: userName
     });
 
-    // Inscrever voluntariamente no tópico criado (opcional)
-    // invitedUsers.forEach(u =>
-    //   // aqui você poderia manter no servidor tokens e fazer subscribe via API Admin,
-    // );
-
-    // Envia notificação via FCM ao tópico do churrasco
-    const topic = `churrasco_${churrasco._id}`;
+    // Envia notificação FCM ao tópico deste churrasco
+    const topicName = `churrasco_${c._id}`;
     const message = {
       notification: {
         title: 'Você foi convidado para um churrasco!',
-        body: `Novo churrasco em ${churrascoDate} às ${hora} no ${local}`
+        body:  `Novo churrasco em ${churrascoDate} às ${hora} no ${local}`
       },
-      data: { churrascoId: String(churrasco._id) },
-      topic
+      data: {
+        id:            String(c._id),
+        churrascoDate, // opcional, o app já pode buscar
+        hora,
+        local
+      },
+      topic: topicName
     };
     await admin.messaging().send(message);
 
-    return res.status(201).json({ success: true, id: String(churrasco._id) });
+    return res.status(201).json({ success: true, id: String(c._id) });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ success: false, message: e.message });
   }
 });
 
-// Lista churrascos ativos ou passados (sem mudanças) :contentReference[oaicite:4]{index=4}:contentReference[oaicite:5]{index=5}
+// 2) Listar churrascos ativos/passados
 app.get('/churrascos', async (req, res) => {
   try {
     const status = req.query.status;
     const now    = new Date();
     const all    = await Churrasco.find().lean();
     const filtered = all.filter(c => {
-      const [d,m,y] = c.churrascoDate.split('/').map(Number);
-      const [h,mi]  = c.hora.split(':').map(Number);
-      const dt      = new Date(y, m-1, d, h, mi);
+      const [d, m, y] = c.churrascoDate.split('/').map(Number);
+      const [h, mi]   = c.hora.split(':').map(Number);
+      const dt        = new Date(y, m - 1, d, h, mi);
       return status === 'active' ? dt >= now : dt < now;
     });
     return res.json({ success: true, churrascos: filtered.map(mapChurrasco) });
@@ -113,11 +114,13 @@ app.get('/churrascos', async (req, res) => {
   }
 });
 
-// Detalhes de um churrasco, wrap em “churrasco” :contentReference[oaicite:6]{index=6}:contentReference[oaicite:7]{index=7}
+// 3) Detalhes de um churrasco
 app.get('/churrascos/:id', async (req, res) => {
   try {
     const c = await Churrasco.findById(req.params.id).lean();
-    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    if (!c) {
+      return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    }
     return res.json({ success: true, churrasco: mapChurrasco(c) });
   } catch (e) {
     console.error(e);
@@ -125,7 +128,7 @@ app.get('/churrascos/:id', async (req, res) => {
   }
 });
 
-// Confirmar presença e unsubscribe do tópico :contentReference[oaicite:8]{index=8}:contentReference[oaicite:9]{index=9}
+// 4) Confirmar presença
 app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
   try {
     const { name, selectedItems } = req.body;
@@ -133,16 +136,17 @@ app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Payload inválido' });
     }
     const c = await Churrasco.findById(req.params.id);
-    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    if (!c) {
+      return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    }
 
     c.guestsConfirmed.push({ name, items: selectedItems });
     c.fornecidos.push(...selectedItems);
     await c.save();
 
-    // Cancela inscrição do tópico
-    const topic = `churrasco_${req.params.id}`;
-    // Aqui assumimos que o cliente faz unsubscribe local; opcionalmente:
-    // await admin.messaging().unsubscribeFromTopic(token, topic);
+    // (Opcional) unsubscribe do tópico via Admin SDK, se você mantiver tokens no servidor
+    // const topicName = `churrasco_${req.params.id}`;
+    // await admin.messaging().unsubscribeFromTopic([token], topicName);
 
     return res.json({ success: true, message: 'Presença confirmada' });
   } catch (e) {
@@ -151,21 +155,22 @@ app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
   }
 });
 
-// Recusar presença e unsubscribe do tópico :contentReference[oaicite:10]{index=10}:contentReference[oaicite:11]{index=11}
+// 5) Recusar presença
 app.post('/churrascos/:id/decline-presenca', async (req, res) => {
   try {
     const { name } = req.body;
-    if (!name) return res.status(400).json({ success: false, message: 'Payload inválido' });
+    if (!name) {
+      return res.status(400).json({ success: false, message: 'Payload inválido' });
+    }
     const c = await Churrasco.findById(req.params.id);
-    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    if (!c) {
+      return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    }
 
     c.guestsDeclined.push(name);
     await c.save();
 
-    // Cancela inscrição do tópico
-    const topic = `churrasco_${req.params.id}`;
-    // await admin.messaging().unsubscribeFromTopic(token, topic);
-
+    // (Opcional) unsubscribe do tópico...
     return res.json({ success: true, message: 'Presença recusada' });
   } catch (e) {
     console.error(e);
@@ -173,11 +178,13 @@ app.post('/churrascos/:id/decline-presenca', async (req, res) => {
   }
 });
 
-// DELETE /churrascos/:id — cancela e notifica (sem mudanças) :contentReference[oaicite:12]{index=12}:contentReference[oaicite:13]{index=13}
+// 6) Cancelar churrasco
 app.delete('/churrascos/:id', async (req, res) => {
   try {
     const c = await Churrasco.findByIdAndDelete(req.params.id);
-    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    if (!c) {
+      return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
+    }
     return res.json({ success: true, message: 'Churrasco cancelado' });
   } catch (e) {
     console.error(e);
@@ -185,7 +192,7 @@ app.delete('/churrascos/:id', async (req, res) => {
   }
 });
 
-// Lista convites pendentes de um usuário
+// 7) Convites pendentes de um usuário
 app.get('/users/:userName/invites', async (req, res) => {
   try {
     const u = req.params.userName;
@@ -201,6 +208,40 @@ app.get('/users/:userName/invites', async (req, res) => {
   }
 });
 
-// Inicializa servidor
+// 8) Endpoint genérico de notificação (para chamadas do RetrofitClient.sendNotification)
+app.post('/send-notification', async (req, res) => {
+  try {
+    const { to, notification, data } = req.body;
+    if (!to || !notification?.title || !notification?.body) {
+      return res.status(400).json({ success: false, message: 'Payload inválido' });
+    }
+
+    // remove prefix "/topics/" se existir
+    const topic = to.startsWith('/topics/') ? to.slice(8) : to;
+
+    // garante que todos os valores de data sejam strings
+    const dataStrings = {};
+    Object.entries(data || {}).forEach(([k, v]) => {
+      dataStrings[k] = String(v);
+    });
+
+    const message = {
+      notification: {
+        title: notification.title,
+        body:  notification.body
+      },
+      data: dataStrings,
+      topic
+    };
+
+    const fcmResponse = await admin.messaging().send(message);
+    return res.json({ success: true, response: fcmResponse });
+  } catch (e) {
+    console.error('Erro em /send-notification:', e);
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Inicia servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
