@@ -1,3 +1,4 @@
+// server.js
 require('dotenv').config();
 
 const express  = require('express');
@@ -5,26 +6,23 @@ const mongoose = require('mongoose');
 const cors     = require('cors');
 const admin    = require('firebase-admin');
 
-// Inicializa Firebase Admin SDK
+// Firebase Admin Init
 const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
 
-// Conecta ao MongoDB
+// MongoDB Connect
 mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser:    true,
+  useNewUrlParser: true,
   useUnifiedTopology: true,
-})
-  .then(() => console.log('MongoDB conectado!'))
+}).then(() => console.log('MongoDB conectado!'))
   .catch(err => {
     console.error('Erro ao conectar ao MongoDB:', err);
     process.exit(1);
   });
 
-// ── MODELS ───────────────────────────────────────────────────────────────
-
-// Usuário
+// Schemas e Models
 const userSchema = new mongoose.Schema({
   username:    { type: String, unique: true, required: true },
   displayName: { type: String, required: true },
@@ -32,7 +30,6 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// Churrasco
 const churrascoSchema = new mongoose.Schema({
   churrascoDate:   { type: String, required: true },
   hora:            { type: String, required: true },
@@ -46,7 +43,6 @@ const churrascoSchema = new mongoose.Schema({
 });
 const Churrasco = mongoose.model('Churrasco', churrascoSchema);
 
-// Helper para normalizar objetos para o front
 function mapChurrasco(c) {
   return {
     id:                   String(c._id),
@@ -65,9 +61,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── ROTAS DE USUÁRIO ────────────────────────────────────────────────────
+// ── ROTAS DE USUÁRIO ───────────────────────────────────────────────
 
-// Registro de usuário
 app.post('/users/register', async (req, res) => {
   try {
     const { username, displayName } = req.body;
@@ -78,13 +73,12 @@ app.post('/users/register', async (req, res) => {
     return res.json({ success: true });
   } catch (e) {
     if (e.code === 11000) {
-      return res.status(400).json({ success: false, message: 'Username já existe' });
+      return res.json({ success: true }); // já existe → tudo bem
     }
     return res.status(500).json({ success: false, message: e.message });
   }
 });
 
-// Login de usuário (registra token FCM)
 app.post('/users/login', async (req, res) => {
   try {
     const { username, fcmToken } = req.body;
@@ -92,9 +86,7 @@ app.post('/users/login', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Dados incompletos' });
     }
     const u = await User.findOne({ username });
-    if (!u) {
-      return res.status(404).json({ success: false, message: 'Usuário não encontrado' });
-    }
+    if (!u) return res.status(404).json({ success: false, message: 'Usuário não encontrado' });
     if (!u.fcmTokens.includes(fcmToken)) {
       u.fcmTokens.push(fcmToken);
       await u.save();
@@ -105,32 +97,28 @@ app.post('/users/login', async (req, res) => {
   }
 });
 
-// Middleware de autenticação (via header X-User)
+app.get('/users/:username', async (req, res) => {
+  const u = await User.findOne({ username: req.params.username });
+  return res.json({ exists: !!u });
+});
+
 async function authMiddleware(req, res, next) {
   const user = req.header('X-User');
-  if (!user) {
-    return res.status(401).json({ success: false, message: 'Não autorizado' });
-  }
+  if (!user) return res.status(401).json({ success: false, message: 'Não autorizado' });
   const u = await User.findOne({ username: user });
-  if (!u) {
-    return res.status(401).json({ success: false, message: 'Usuário inválido' });
-  }
+  if (!u) return res.status(401).json({ success: false, message: 'Usuário inválido' });
   req.user = u.username;
   next();
 }
 
-// ── ROTAS DE CHURRASCO (protegidas) ─────────────────────────────────────
+// ── ROTAS DE CHURRASCO ─────────────────────────────────────────────
+
 app.use('/churrascos', authMiddleware);
 
-// Criar churrasco e notificar convidados
 app.post('/churrascos', async (req, res) => {
   try {
     const { churrascoDate, hora, local, fornecidos, invitedUsers } = req.body;
-    if (
-      !churrascoDate || !hora || !local ||
-      !Array.isArray(fornecidos) ||
-      !Array.isArray(invitedUsers)
-    ) {
+    if (!churrascoDate || !hora || !local || !Array.isArray(fornecidos) || !Array.isArray(invitedUsers)) {
       return res.status(400).json({ success: false, message: 'Dados incompletos' });
     }
     const createdBy = req.user;
@@ -140,12 +128,9 @@ app.post('/churrascos', async (req, res) => {
       invitedUsers, createdBy
     });
 
-    // Busca tokens dos convidados
     const users = await User.find({ username: { $in: invitedUsers } });
     const tokens = users.flatMap(u => u.fcmTokens);
-
     if (tokens.length) {
-      // Envia notificação a todos os tokens convidados
       await admin.messaging().sendMulticast({
         notification: {
           title: 'Você foi convidado para um churrasco!',
@@ -155,23 +140,21 @@ app.post('/churrascos', async (req, res) => {
         tokens
       });
     }
-
     return res.status(201).json({ success: true, id: String(c._id) });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
   }
 });
 
-// Listar churrascos (ativos ou passados)
 app.get('/churrascos', async (req, res) => {
   try {
     const status = req.query.status;
     const now = new Date();
     const all = await Churrasco.find().lean();
     const filtered = all.filter(c => {
-      const [d,m,y] = c.churrascoDate.split('/').map(Number);
-      const [h,mi]  = c.hora.split(':').map(Number);
-      const dt = new Date(y, m-1, d, h, mi);
+      const [d, m, y] = c.churrascoDate.split('/').map(Number);
+      const [h, mi]  = c.hora.split(':').map(Number);
+      const dt = new Date(y, m - 1, d, h, mi);
       return status === 'active' ? dt >= now : dt < now;
     });
     return res.json({ success: true, churrascos: filtered.map(mapChurrasco) });
@@ -180,20 +163,16 @@ app.get('/churrascos', async (req, res) => {
   }
 });
 
-// Detalhes de um churrasco
 app.get('/churrascos/:id', async (req, res) => {
   try {
     const c = await Churrasco.findById(req.params.id).lean();
-    if (!c) {
-      return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
-    }
+    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
     return res.json({ success: true, churrasco: mapChurrasco(c) });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
   }
 });
 
-// Confirmar presença
 app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
   try {
     const { name, selectedItems } = req.body;
@@ -201,9 +180,7 @@ app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Payload inválido' });
     }
     const c = await Churrasco.findById(req.params.id);
-    if (!c) {
-      return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
-    }
+    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
     c.guestsConfirmed.push({ name, items: selectedItems });
     c.fornecidos.push(...selectedItems);
     await c.save();
@@ -213,17 +190,12 @@ app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
   }
 });
 
-// Recusar presença
 app.post('/churrascos/:id/decline-presenca', async (req, res) => {
   try {
     const { name } = req.body;
-    if (!name) {
-      return res.status(400).json({ success: false, message: 'Payload inválido' });
-    }
+    if (!name) return res.status(400).json({ success: false, message: 'Payload inválido' });
     const c = await Churrasco.findById(req.params.id);
-    if (!c) {
-      return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
-    }
+    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
     c.guestsDeclined.push(name);
     await c.save();
     return res.json({ success: true, message: 'Presença recusada' });
@@ -232,23 +204,20 @@ app.post('/churrascos/:id/decline-presenca', async (req, res) => {
   }
 });
 
-// Deletar churrasco
 app.delete('/churrascos/:id', async (req, res) => {
   try {
     const c = await Churrasco.findByIdAndDelete(req.params.id);
-    if (!c) {
-      return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
-    }
+    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
     return res.json({ success: true, message: 'Churrasco cancelado' });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
   }
 });
 
-// Convites pendentes de um usuário
 app.get('/users/:username/invites', authMiddleware, async (req, res) => {
   try {
     const u = req.params.username;
+    if (u !== req.user) return res.status(403).json({ success: false, message: 'Acesso negado' });
     const all = await Churrasco.find({ invitedUsers: u }).lean();
     const pendentes = all.filter(c =>
       !c.guestsConfirmed.some(g => g.name === u) &&
@@ -260,7 +229,6 @@ app.get('/users/:username/invites', authMiddleware, async (req, res) => {
   }
 });
 
-// (Opcional) Listar todos usuários — útil para seleção de convidados
 app.get('/users', authMiddleware, async (req, res) => {
   try {
     const users = await User.find().select('username displayName -_id').lean();
