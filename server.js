@@ -121,15 +121,23 @@ app.post('/churrascos', async (req, res) => {
     if (!churrascoDate || !hora || !local || !Array.isArray(fornecidos) || !Array.isArray(invitedUsers)) {
       return res.status(400).json({ success: false, message: 'Dados incompletos' });
     }
+
     const createdBy = req.user;
+
     const c = await Churrasco.create({
-      churrascoDate, hora, local, fornecidos,
-      guestsConfirmed: [], guestsDeclined: [],
-      invitedUsers, createdBy
+      churrascoDate,
+      hora,
+      local,
+      fornecidos,
+      guestsConfirmed: [],
+      guestsDeclined: [],
+      invitedUsers,
+      createdBy
     });
 
     const users = await User.find({ username: { $in: invitedUsers } });
     const tokens = users.flatMap(u => u.fcmTokens);
+
     if (tokens.length) {
       await admin.messaging().sendMulticast({
         notification: {
@@ -140,11 +148,19 @@ app.post('/churrascos', async (req, res) => {
         tokens
       });
     }
+
     return res.status(201).json({ success: true, id: String(c._id) });
+
   } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+    console.error("ERRO AO CRIAR CHURRASCO:", e);
+    return res.status(500).json({
+      success: false,
+      message: e.message || 'Erro desconhecido',
+      stack: e.stack
+    });
   }
 });
+
 
 app.get('/churrascos', async (req, res) => {
   try {
