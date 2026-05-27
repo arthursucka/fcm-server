@@ -1,130 +1,351 @@
 // server.js
 require('dotenv').config();
 
-const express  = require('express');
+const express = require('express');
 const mongoose = require('mongoose');
-const cors     = require('cors');
-const admin    = require('firebase-admin');
+const cors = require('cors');
+const admin = require('firebase-admin');
+
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+  console.error('Erro: variavel MONGO_URI nao configurada.');
+  process.exit(1);
+}
 
 // Firebase Admin Init
-const serviceAccount = require(process.env.SERVICE_ACCOUNT_KEY_PATH);
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+let firebaseEnabled = false;
+
+try {
+  if (!process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+    console.warn('Aviso: FIREBASE_SERVICE_ACCOUNT_BASE64 nao configurada. Notificacoes desativadas.');
+  } else {
+    const serviceAccountJson = Buffer.from(
+      process.env.FIREBASE_SERVICE_ACCOUNT_BASE64,
+      'base64'
+    ).toString('utf8');
+
+    const serviceAccount = JSON.parse(serviceAccountJson);
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+
+    firebaseEnabled = true;
+    console.log('Firebase Admin inicializado!');
+  }
+} catch (error) {
+  console.error('Erro ao inicializar Firebase Admin:', error);
+  firebaseEnabled = false;
+}
 
 // MongoDB Connect
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-}).then(() => console.log('MongoDB conectado!'))
-  .catch(err => {
+mongoose
+  .connect(MONGO_URI)
+  .then(() => console.log('MongoDB conectado!'))
+  .catch((err) => {
     console.error('Erro ao conectar ao MongoDB:', err);
     process.exit(1);
   });
 
 // Schemas e Models
 const userSchema = new mongoose.Schema({
-  username:    { type: String, unique: true, required: true },
-  displayName: { type: String, required: true },
-  fcmTokens:   { type: [String], default: [] }
+  username: { type: String, unique: true, required: true, trim: true },
+  displayName: { type: String, required: true, trim: true },
+  fcmTokens: { type: [String], default: [] },
 });
+
 const User = mongoose.model('User', userSchema);
 
 const churrascoSchema = new mongoose.Schema({
-  churrascoDate:   { type: String, required: true },
-  hora:            { type: String, required: true },
-  local:           { type: String, required: true },
-  fornecidos:      { type: [String], default: [] },
+  churrascoDate: { type: String, required: true },
+  hora: { type: String, required: true },
+  local: { type: String, required: true },
+  fornecidos: { type: [String], default: [] },
   guestsConfirmed: [{ name: String, items: [String] }],
-  guestsDeclined:  { type: [String], default: [] },
-  invitedUsers:    { type: [String], default: [] },
-  createdBy:       { type: String, required: true },
-  createdAt:       { type: Date, default: Date.now },
+  guestsDeclined: { type: [String], default: [] },
+  invitedUsers: { type: [String], default: [] },
+  createdBy: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
 });
+
 const Churrasco = mongoose.model('Churrasco', churrascoSchema);
 
 function mapChurrasco(c) {
   return {
-    id:                   String(c._id),
-    churrascoDate:        c.churrascoDate,
-    hora:                 c.hora,
-    local:                c.local,
-    createdBy:            c.createdBy,
-    invitedUsers:         c.invitedUsers,
-    fornecidosAgregados:  c.fornecidos,
-    guestsConfirmed:      c.guestsConfirmed,
-    guestsDeclined:       c.guestsDeclined,
+    id: String(c._id),
+    churrascoDate: c.churrascoDate,
+    hora: c.hora,
+    local: c.local,
+    createdBy: c.createdBy,
+    invitedUsers: c.invitedUsers || [],
+    fornecidosAgregados: c.fornecidos || [],
+    guestsConfirmed: c.guestsConfirmed || [],
+    guestsDeclined: c.guestsDeclined || [],
   };
 }
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+async function authMiddleware(req, res, next) {
+  try {
+    const username = req.header('X-User');
 
-// ── ROTAS DE USUÁRIO ───────────────────────────────────────────────
+    if (!username) {
+      return res.status(401).json({
+        success: false,
+        message: 'Nao autorizado',
+      });
+    }
 
+    const user = await User.findOne({ username });
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario invalido',
+      });
+    }
+
+    req.user = user.username;
+    next();
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+}
+
+async function sendInviteNotifications(churrasco, tokens) {
+  if (!firebaseEnabled) {
+    console.warn('Firebase desativado. Convites criados sem notificacao.');
+    return;
+  }
+
+  if (!tokens.length) {
+    return;
+  }
+
+  const results = await Promise.allSettled(
+    tokens.map((token) =>
+      admin.messaging().send({
+        token,
+        notification: {
+          title: 'Voce foi convidado para um churrasco!',
+          body: `Em ${churrasco.churrascoDate} as ${churrasco.hora} no ${churrasco.local}`,
+        },
+        data: {
+          churrascoId: String(churrasco._id),
+        },
+      })
+    )
+  );
+
+  const failedTokens = [];
+
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      const token = tokens[index];
+      const code = result.reason?.errorInfo?.code || result.reason?.code;
+
+      console.error('Erro ao enviar FCM:', {
+        token,
+        code,
+        message: result.reason?.message,
+      });
+
+      if (
+        code === 'messaging/registration-token-not-registered' ||
+        code === 'messaging/invalid-registration-token' ||
+        code === 'messaging/invalid-argument'
+      ) {
+        failedTokens.push(token);
+      }
+    }
+  });
+
+  if (failedTokens.length) {
+    await User.updateMany(
+      { fcmTokens: { $in: failedTokens } },
+      { $pull: { fcmTokens: { $in: failedTokens } } }
+    );
+
+    console.log(`Tokens invalidos removidos: ${failedTokens.length}`);
+  }
+}
+
+// Health check
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Backend do Churrasco online',
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    mongo: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    firebase: firebaseEnabled ? 'enabled' : 'disabled',
+  });
+});
+
+// Rotas de usuario
 app.post('/users/register', async (req, res) => {
   try {
     const { username, displayName } = req.body;
+
     if (!username || !displayName) {
-      return res.status(400).json({ success: false, message: 'Dados incompletos' });
+      return res.status(400).json({
+        success: false,
+        message: 'Dados incompletos',
+      });
     }
-    await User.create({ username, displayName });
+
+    await User.create({
+      username: username.trim(),
+      displayName: displayName.trim(),
+    });
+
     return res.json({ success: true });
-  } catch (e) {
-    if (e.code === 11000) {
-      return res.json({ success: true }); // já existe → tudo bem
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.json({ success: true });
     }
-    return res.status(500).json({ success: false, message: e.message });
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
 app.post('/users/login', async (req, res) => {
   try {
     const { username, fcmToken } = req.body;
+
     if (!username || !fcmToken) {
-      return res.status(400).json({ success: false, message: 'Dados incompletos' });
+      return res.status(400).json({
+        success: false,
+        message: 'Dados incompletos',
+      });
     }
-    const u = await User.findOne({ username });
-    if (!u) return res.status(404).json({ success: false, message: 'Usuário não encontrado' });
-    if (!u.fcmTokens.includes(fcmToken)) {
-      u.fcmTokens.push(fcmToken);
-      await u.save();
+
+    const user = await User.findOne({ username: username.trim() });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario nao encontrado',
+      });
     }
+
+    if (!user.fcmTokens.includes(fcmToken)) {
+      user.fcmTokens.push(fcmToken);
+      await user.save();
+    }
+
     return res.json({ success: true });
-  } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
 app.get('/users/:username', async (req, res) => {
-  const u = await User.findOne({ username: req.params.username });
-  return res.json({ exists: !!u });
+  try {
+    const user = await User.findOne({ username: req.params.username });
+
+    return res.json({
+      success: true,
+      exists: !!user,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
 });
 
-async function authMiddleware(req, res, next) {
-  const user = req.header('X-User');
-  if (!user) return res.status(401).json({ success: false, message: 'Não autorizado' });
-  const u = await User.findOne({ username: user });
-  if (!u) return res.status(401).json({ success: false, message: 'Usuário inválido' });
-  req.user = u.username;
-  next();
-}
+app.get('/users', authMiddleware, async (req, res) => {
+  try {
+    const users = await User.find()
+      .select('username displayName -_id')
+      .sort({ displayName: 1 })
+      .lean();
 
-// ── ROTAS DE CHURRASCO ─────────────────────────────────────────────
+    return res.json({
+      success: true,
+      payload: users,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
 
+app.get('/users/:username/invites', authMiddleware, async (req, res) => {
+  try {
+    const username = req.params.username;
+
+    if (username !== req.user) {
+      return res.status(403).json({
+        success: false,
+        message: 'Acesso negado',
+      });
+    }
+
+    const churrascos = await Churrasco.find({ invitedUsers: username }).lean();
+
+    const pendentes = churrascos.filter(
+      (c) =>
+        !c.guestsConfirmed.some((guest) => guest.name === username) &&
+        !c.guestsDeclined.includes(username)
+    );
+
+    return res.json({
+      success: true,
+      invites: pendentes.map(mapChurrasco),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// Rotas de churrasco
 app.use('/churrascos', authMiddleware);
 
 app.post('/churrascos', async (req, res) => {
   try {
     const { churrascoDate, hora, local, fornecidos, invitedUsers } = req.body;
-    if (!churrascoDate || !hora || !local || !Array.isArray(fornecidos) || !Array.isArray(invitedUsers)) {
-      return res.status(400).json({ success: false, message: 'Dados incompletos' });
+
+    if (
+      !churrascoDate ||
+      !hora ||
+      !local ||
+      !Array.isArray(fornecidos) ||
+      !Array.isArray(invitedUsers)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Dados incompletos',
+      });
     }
 
-    const createdBy = req.user;
-
-    const c = await Churrasco.create({
+    const churrasco = await Churrasco.create({
       churrascoDate,
       hora,
       local,
@@ -132,129 +353,242 @@ app.post('/churrascos', async (req, res) => {
       guestsConfirmed: [],
       guestsDeclined: [],
       invitedUsers,
-      createdBy
+      createdBy: req.user,
     });
 
-    const users = await User.find({ username: { $in: invitedUsers } });
-    const tokens = users.flatMap(u => u.fcmTokens);
+    const users = await User.find({
+      username: { $in: invitedUsers },
+    }).lean();
 
-    if (tokens.length) {
-    await Promise.all(tokens.map(token =>
-  admin.messaging().send({
-    token,
-    notification: {
-      title: 'Você foi convidado para um churrasco!',
-      body: `Em ${churrascoDate} às ${hora} no ${local}`
-    },
-    data: { churrascoId: String(c._id) }
-  })
-));
-    }
+    const tokens = users.flatMap((user) => user.fcmTokens || []);
 
-    return res.status(201).json({ success: true, id: String(c._id) });
+    sendInviteNotifications(churrasco, tokens).catch((error) => {
+      console.error('Erro inesperado ao enviar notificacoes:', error);
+    });
 
-  } catch (e) {
-    console.error("ERRO AO CRIAR CHURRASCO:", e);
+    return res.status(201).json({
+      success: true,
+      id: String(churrasco._id),
+    });
+  } catch (error) {
+    console.error('ERRO AO CRIAR CHURRASCO:', error);
+
     return res.status(500).json({
       success: false,
-      message: e.message || 'Erro desconhecido',
-      stack: e.stack
+      message: error.message || 'Erro desconhecido',
     });
   }
 });
-
 
 app.get('/churrascos', async (req, res) => {
   try {
     const status = req.query.status;
     const now = new Date();
-    const all = await Churrasco.find().lean();
-    const filtered = all.filter(c => {
-      const [d, m, y] = c.churrascoDate.split('/').map(Number);
-      const [h, mi]  = c.hora.split(':').map(Number);
-      const dt = new Date(y, m - 1, d, h, mi);
-      return status === 'active' ? dt >= now : dt < now;
+
+    const churrascos = await Churrasco.find().lean();
+
+    const filtered = churrascos.filter((c) => {
+      const [day, month, year] = c.churrascoDate.split('/').map(Number);
+      const [hour, minute] = c.hora.split(':').map(Number);
+      const eventDate = new Date(year, month - 1, day, hour, minute);
+
+      if (status === 'active') return eventDate >= now;
+      if (status === 'past') return eventDate < now;
+
+      return true;
     });
-    return res.json({ success: true, churrascos: filtered.map(mapChurrasco) });
-  } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+
+    return res.json({
+      success: true,
+      churrascos: filtered.map(mapChurrasco),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
 app.get('/churrascos/:id', async (req, res) => {
   try {
-    const c = await Churrasco.findById(req.params.id).lean();
-    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
-    return res.json({ success: true, churrasco: mapChurrasco(c) });
-  } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID invalido',
+      });
+    }
+
+    const churrasco = await Churrasco.findById(req.params.id).lean();
+
+    if (!churrasco) {
+      return res.status(404).json({
+        success: false,
+        message: 'Churrasco nao encontrado',
+      });
+    }
+
+    return res.json({
+      success: true,
+      churrasco: mapChurrasco(churrasco),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
 app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
   try {
     const { name, selectedItems } = req.body;
+
     if (!name || !Array.isArray(selectedItems)) {
-      return res.status(400).json({ success: false, message: 'Payload inválido' });
+      return res.status(400).json({
+        success: false,
+        message: 'Payload invalido',
+      });
     }
-    const c = await Churrasco.findById(req.params.id);
-    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
-    c.guestsConfirmed.push({ name, items: selectedItems });
-    c.fornecidos.push(...selectedItems);
-    await c.save();
-    return res.json({ success: true, message: 'Presença confirmada' });
-  } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID invalido',
+      });
+    }
+
+    const churrasco = await Churrasco.findById(req.params.id);
+
+    if (!churrasco) {
+      return res.status(404).json({
+        success: false,
+        message: 'Churrasco nao encontrado',
+      });
+    }
+
+    churrasco.guestsConfirmed = churrasco.guestsConfirmed.filter(
+      (guest) => guest.name !== name
+    );
+
+    churrasco.guestsDeclined = churrasco.guestsDeclined.filter(
+      (guestName) => guestName !== name
+    );
+
+    churrasco.guestsConfirmed.push({
+      name,
+      items: selectedItems,
+    });
+
+    const mergedItems = new Set([
+      ...churrasco.fornecidos,
+      ...selectedItems,
+    ]);
+
+    churrasco.fornecidos = Array.from(mergedItems);
+
+    await churrasco.save();
+
+    return res.json({
+      success: true,
+      message: 'Presenca confirmada',
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
 app.post('/churrascos/:id/decline-presenca', async (req, res) => {
   try {
     const { name } = req.body;
-    if (!name) return res.status(400).json({ success: false, message: 'Payload inválido' });
-    const c = await Churrasco.findById(req.params.id);
-    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
-    c.guestsDeclined.push(name);
-    await c.save();
-    return res.json({ success: true, message: 'Presença recusada' });
-  } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+
+    if (!name) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payload invalido',
+      });
+    }
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID invalido',
+      });
+    }
+
+    const churrasco = await Churrasco.findById(req.params.id);
+
+    if (!churrasco) {
+      return res.status(404).json({
+        success: false,
+        message: 'Churrasco nao encontrado',
+      });
+    }
+
+    churrasco.guestsConfirmed = churrasco.guestsConfirmed.filter(
+      (guest) => guest.name !== name
+    );
+
+    if (!churrasco.guestsDeclined.includes(name)) {
+      churrasco.guestsDeclined.push(name);
+    }
+
+    await churrasco.save();
+
+    return res.json({
+      success: true,
+      message: 'Presenca recusada',
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
 app.delete('/churrascos/:id', async (req, res) => {
   try {
-    const c = await Churrasco.findByIdAndDelete(req.params.id);
-    if (!c) return res.status(404).json({ success: false, message: 'Churrasco não encontrado' });
-    return res.json({ success: true, message: 'Churrasco cancelado' });
-  } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID invalido',
+      });
+    }
+
+    const churrasco = await Churrasco.findById(req.params.id);
+
+    if (!churrasco) {
+      return res.status(404).json({
+        success: false,
+        message: 'Churrasco nao encontrado',
+      });
+    }
+
+    if (churrasco.createdBy !== req.user) {
+      return res.status(403).json({
+        success: false,
+        message: 'Apenas o criador pode cancelar este churrasco',
+      });
+    }
+
+    await Churrasco.findByIdAndDelete(req.params.id);
+
+    return res.json({
+      success: true,
+      message: 'Churrasco cancelado',
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
-app.get('/users/:username/invites', authMiddleware, async (req, res) => {
-  try {
-    const u = req.params.username;
-    if (u !== req.user) return res.status(403).json({ success: false, message: 'Acesso negado' });
-    const all = await Churrasco.find({ invitedUsers: u }).lean();
-    const pendentes = all.filter(c =>
-      !c.guestsConfirmed.some(g => g.name === u) &&
-      !c.guestsDeclined.includes(u)
-    );
-    return res.json({ success: true, invites: pendentes.map(mapChurrasco) });
-  } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
-  }
+app.listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
 });
-
-app.get('/users', authMiddleware, async (req, res) => {
-  try {
-    const users = await User.find().select('username displayName -_id').lean();
-    return res.json({ success: true, payload: users });
-  } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
