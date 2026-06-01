@@ -5,6 +5,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const admin = require('firebase-admin');
+const fs = require('fs');
 
 const app = express();
 
@@ -26,14 +27,11 @@ if (!MONGO_URI) {
 let firebaseEnabled = false;
 
 try {
-  if (!process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
-    console.warn('Aviso: FIREBASE_SERVICE_ACCOUNT_BASE64 nao configurada. Notificacoes desativadas.');
-  } else {
-    const serviceAccountJson = Buffer.from(
-      process.env.FIREBASE_SERVICE_ACCOUNT_BASE64,
-      'base64'
-    ).toString('utf8');
+  const serviceAccountJson = resolveServiceAccountJson();
 
+  if (!serviceAccountJson) {
+    console.warn('Aviso: credencial Firebase nao configurada. Notificacoes e chat desativados.');
+  } else {
     const serviceAccount = JSON.parse(serviceAccountJson);
 
     admin.initializeApp({
@@ -47,6 +45,28 @@ try {
 } catch (error) {
   console.error('Erro ao inicializar Firebase Admin:', error);
   firebaseEnabled = false;
+}
+
+function resolveServiceAccountJson() {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+    return Buffer.from(
+      process.env.FIREBASE_SERVICE_ACCOUNT_BASE64,
+      'base64'
+    ).toString('utf8');
+  }
+
+  if (process.env.SERVICE_ACCOUNT_KEY) {
+    const value = process.env.SERVICE_ACCOUNT_KEY.trim();
+    if (value.startsWith('{')) return value;
+
+    return Buffer.from(value, 'base64').toString('utf8');
+  }
+
+  if (process.env.SERVICE_ACCOUNT_KEY_PATH && fs.existsSync(process.env.SERVICE_ACCOUNT_KEY_PATH)) {
+    return fs.readFileSync(process.env.SERVICE_ACCOUNT_KEY_PATH, 'utf8');
+  }
+
+  return null;
 }
 
 // MongoDB Connect
