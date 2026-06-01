@@ -1,3 +1,353 @@
+// server.js
+require('dotenv').config();
+
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const admin = require('firebase-admin');
+
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const MONGO_URI = process.env.MONGO_URI;
+const FIREBASE_DATABASE_URL =
+  process.env.FIREBASE_DATABASE_URL ||
+  'https://churrasco-aa495-default-rtdb.firebaseio.com';
+
+if (!MONGO_URI) {
+  console.error('Erro: variavel MONGO_URI nao configurada.');
+  process.exit(1);
+}
+
+// Firebase Admin Init
+let firebaseEnabled = false;
+
+try {
+  if (!process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+    console.warn('Aviso: FIREBASE_SERVICE_ACCOUNT_BASE64 nao configurada. Notificacoes desativadas.');
+  } else {
+    const serviceAccountJson = Buffer.from(
+      process.env.FIREBASE_SERVICE_ACCOUNT_BASE64,
+      'base64'
+    ).toString('utf8');
+
+    const serviceAccount = JSON.parse(serviceAccountJson);
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      databaseURL: FIREBASE_DATABASE_URL,
+    });
+
+    firebaseEnabled = true;
+    console.log('Firebase Admin inicializado!');
+  }
+} catch (error) {
+  console.error('Erro ao inicializar Firebase Admin:', error);
+  firebaseEnabled = false;
+}
+
+// MongoDB Connect
+mongoose
+  .connect(MONGO_URI)
+  .then(() => console.log('MongoDB conectado!'))
+  .catch((err) => {
+    console.error('Erro ao conectar ao MongoDB:', err);
+    process.exit(1);
+  });
+
+// Schemas e Models
+const userSchema = new mongoose.Schema({
+  username: { type: String, unique: true, required: true, trim: true },
+  displayName: { type: String, required: true, trim: true },
+  fcmTokens: { type: [String], default: [] },
+});
+
+const User = mongoose.model('User', userSchema);
+
+const churrascoSchema = new mongoose.Schema({
+  churrascoDate: { type: String, required: true },
+  hora: { type: String, required: true },
+  local: { type: String, required: true },
+  fornecidos: { type: [String], default: [] },
+  guestsConfirmed: [{ name: String, items: [String] }],
+  guestsDeclined: { type: [String], default: [] },
+  invitedUsers: { type: [String], default: [] },
+  createdBy: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Churrasco = mongoose.model('Churrasco', churrascoSchema);
+
+function mapChurrasco(c) {
+  return {
+    id: String(c._id),
+    churrascoDate: c.churrascoDate,
+    hora: c.hora,
+    local: c.local,
+    createdBy: c.createdBy,
+    invitedUsers: c.invitedUsers || [],
+    fornecidosAgregados: c.fornecidos || [],
+    guestsConfirmed: c.guestsConfirmed || [],
+    guestsDeclined: c.guestsDeclined || [],
+  };
+}
+
+async function authMiddleware(req, res, next) {
+  try {
+    const username = req.header('X-User');
+
+    if (!username) {
+      return res.status(401).json({
+        success: false,
+        message: 'Nao autorizado',
+      });
+    }
+
+    const user = await User.findOne({ username });
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario invalido',
+      });
+    }
+
+    req.user = user.username;
+    next();
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+}
+
+async function sendInviteNotifications(churrasco, tokens) {
+  if (!firebaseEnabled) {
+    console.warn('Firebase desativado. Convites criados sem notificacao.');
+    return;
+  }
+
+  if (!tokens.length) {
+    return;
+  }
+
+  const results = await Promise.allSettled(
+    tokens.map((token) =>
+      admin.messaging().send({
+        token,
+        data: {
+          type: 'invite',
+          churrascoId: String(churrasco._id),
+          title: 'Voce foi convidado para um churrasco!',
+          body: `Em ${churrasco.churrascoDate} as ${churrasco.hora} no ${churrasco.local}`,
+        },
+        android: {
+          priority: 'high',
+        },
+      })
+    )
+  );
+
+  const failedTokens = [];
+
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      const token = tokens[index];
+      const code = result.reason?.errorInfo?.code || result.reason?.code;
+
+      console.error('Erro ao enviar FCM:', {
+        token,
+        code,
+        message: result.reason?.message,
+      });
+
+      if (
+        code === 'messaging/registration-token-not-registered' ||
+        code === 'messaging/invalid-registration-token' ||
+        code === 'messaging/invalid-argument'
+      ) {
+        failedTokens.push(token);
+      }
+    }
+  });
+
+  if (failedTokens.length) {
+    await User.updateMany(
+      { fcmTokens: { $in: failedTokens } },
+      { $pull: { fcmTokens: { $in: failedTokens } } }
+    );
+
+    console.log(`Tokens invalidos removidos: ${failedTokens.length}`);
+  }
+}
+
+async function sendChatNotifications(churrasco, sender, text) {
+  if (!firebaseEnabled) {
+    console.warn('Firebase desativado. Mensagem salva sem notificacao.');
+    return;
+  }
+
+  const confirmedUsers = (churrasco.guestsConfirmed || [])
+    .map((guest) => guest.name)
+    .filter(Boolean);
+
+  const participants = Array.from(
+    new Set([
+      churrasco.createdBy,
+      ...confirmedUsers,
+    ].filter(Boolean))
+  );
+
+  const recipients = participants.filter((username) => username !== sender);
+
+  if (!recipients.length) {
+    return;
+  }
+
+  const users = await User.find({
+    username: { $in: recipients },
+  }).lean();
+
+  const tokens = Array.from(
+    new Set(users.flatMap((user) => user.fcmTokens || []))
+  );
+
+  if (!tokens.length) {
+    return;
+  }
+
+  const body = text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  const results = await Promise.allSettled(
+    tokens.map((token) =>
+      admin.messaging().send({
+        token,
+        data: {
+          type: 'chat_message',
+          churrascoId: String(churrasco._id),
+          title: `Nova mensagem de ${sender}`,
+          body,
+        },
+        android: {
+          priority: 'high',
+        },
+      })
+    )
+  );
+
+  const failedTokens = [];
+
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      const token = tokens[index];
+      const code = result.reason?.errorInfo?.code || result.reason?.code;
+
+      console.error('Erro ao enviar FCM de chat:', {
+        token,
+        code,
+        message: result.reason?.message,
+      });
+
+      if (
+        code === 'messaging/registration-token-not-registered' ||
+        code === 'messaging/invalid-registration-token' ||
+        code === 'messaging/invalid-argument'
+      ) {
+        failedTokens.push(token);
+      }
+    }
+  });
+
+  if (failedTokens.length) {
+    await User.updateMany(
+      { fcmTokens: { $in: failedTokens } },
+      { $pull: { fcmTokens: { $in: failedTokens } } }
+    );
+
+    console.log(`Tokens invalidos de chat removidos: ${failedTokens.length}`);
+  }
+}
+
+// Health check
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Backend do Churrasco online',
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    mongo: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    firebase: firebaseEnabled ? 'enabled' : 'disabled',
+  });
+});
+
+// Rotas de usuario
+app.post('/users/register', async (req, res) => {
+  try {
+    const { username, displayName } = req.body;
+
+    if (!username || !displayName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Dados incompletos',
+      });
+    }
+
+    await User.create({
+      username: username.trim(),
+      displayName: displayName.trim(),
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.json({ success: true });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+app.post('/users/login', async (req, res) => {
+  try {
+    const { username, fcmToken } = req.body;
+
+    if (!username || !fcmToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Dados incompletos',
+      });
+    }
+
+    const user = await User.findOne({ username: username.trim() });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario nao encontrado',
+      });
+    }
+
+    if (!user.fcmTokens.includes(fcmToken)) {
+      user.fcmTokens.push(fcmToken);
+      await user.save();
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
@@ -248,3 +598,171 @@ app.post('/churrascos/:id/messages', async (req, res) => {
 
     sendChatNotifications(churrasco, sender, message.text).catch((error) => {
       console.error('Erro inesperado ao enviar notificacoes de chat:', error);
+    });
+
+    return res.json({
+      success: true,
+      message: 'Mensagem enviada',
+    });
+  } catch (error) {
+    console.error('Erro ao enviar mensagem de chat:', error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
+  try {
+    const { name, selectedItems } = req.body;
+
+    if (!name || !Array.isArray(selectedItems)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payload invalido',
+      });
+    }
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID invalido',
+      });
+    }
+
+    const churrasco = await Churrasco.findById(req.params.id);
+
+    if (!churrasco) {
+      return res.status(404).json({
+        success: false,
+        message: 'Churrasco nao encontrado',
+      });
+    }
+
+    churrasco.guestsConfirmed = churrasco.guestsConfirmed.filter(
+      (guest) => guest.name !== name
+    );
+
+    churrasco.guestsDeclined = churrasco.guestsDeclined.filter(
+      (guestName) => guestName !== name
+    );
+
+    churrasco.guestsConfirmed.push({
+      name,
+      items: selectedItems,
+    });
+
+    const mergedItems = new Set([
+      ...churrasco.fornecidos,
+      ...selectedItems,
+    ]);
+
+    churrasco.fornecidos = Array.from(mergedItems);
+
+    await churrasco.save();
+
+    return res.json({
+      success: true,
+      message: 'Presenca confirmada',
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+app.post('/churrascos/:id/decline-presenca', async (req, res) => {
+  try {
+    const { name } = req.body;
+
+    if (!name) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payload invalido',
+      });
+    }
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID invalido',
+      });
+    }
+
+    const churrasco = await Churrasco.findById(req.params.id);
+
+    if (!churrasco) {
+      return res.status(404).json({
+        success: false,
+        message: 'Churrasco nao encontrado',
+      });
+    }
+
+    churrasco.guestsConfirmed = churrasco.guestsConfirmed.filter(
+      (guest) => guest.name !== name
+    );
+
+    if (!churrasco.guestsDeclined.includes(name)) {
+      churrasco.guestsDeclined.push(name);
+    }
+
+    await churrasco.save();
+
+    return res.json({
+      success: true,
+      message: 'Presenca recusada',
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+app.delete('/churrascos/:id', async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID invalido',
+      });
+    }
+
+    const churrasco = await Churrasco.findById(req.params.id);
+
+    if (!churrasco) {
+      return res.status(404).json({
+        success: false,
+        message: 'Churrasco nao encontrado',
+      });
+    }
+
+    if (churrasco.createdBy !== req.user) {
+      return res.status(403).json({
+        success: false,
+        message: 'Apenas o criador pode cancelar este churrasco',
+      });
+    }
+
+    await Churrasco.findByIdAndDelete(req.params.id);
+
+    return res.json({
+      success: true,
+      message: 'Churrasco cancelado',
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
+});
