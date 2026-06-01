@@ -641,6 +641,26 @@ app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
       });
     }
 
+    const previousGuest = churrasco.guestsConfirmed.find(
+      (guest) => guest.name === name
+    );
+    const previousItems = previousGuest?.items || [];
+    const currentItemsFromOtherGuests = churrasco.guestsConfirmed
+      .filter((guest) => guest.name !== name)
+      .flatMap((guest) => guest.items || []);
+    const reservedItems = new Set([
+      ...churrasco.fornecidos.filter((item) => !previousItems.includes(item)),
+      ...currentItemsFromOtherGuests,
+    ]);
+    const duplicatedItems = selectedItems.filter((item) => reservedItems.has(item));
+
+    if (duplicatedItems.length) {
+      return res.status(409).json({
+        success: false,
+        message: `Item ja assumido: ${duplicatedItems.join(', ')}`,
+      });
+    }
+
     churrasco.guestsConfirmed = churrasco.guestsConfirmed.filter(
       (guest) => guest.name !== name
     );
