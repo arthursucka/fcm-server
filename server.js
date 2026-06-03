@@ -115,6 +115,40 @@ function mapChurrasco(c) {
   };
 }
 
+function participantCanShareLocation(churrasco, username) {
+  if (churrasco.createdBy === username) return true;
+
+  return (churrasco.guestsConfirmed || []).some(
+    (guest) => guest.name === username
+  );
+}
+
+function locationSharingWindowIsOpen(churrasco) {
+  const eventTime = parseEventDateTime(churrasco.churrascoDate, churrasco.hora);
+  if (!eventTime) return true;
+
+  const now = Date.now();
+  const opensAt = eventTime.getTime() - 60 * 60 * 1000;
+  const closesAt = eventTime.getTime() + 4 * 60 * 60 * 1000;
+
+  return now >= opensAt && now <= closesAt;
+}
+
+function parseEventDateTime(date, time) {
+  const [day, month, year] = String(date).split('/').map(Number);
+  const [hour, minute] = String(time).split(':').map(Number);
+
+  if (![day, month, year, hour, minute].every(Number.isFinite)) {
+    return null;
+  }
+
+  return new Date(year, month - 1, day, hour, minute, 0, 0);
+}
+
+function safeFirebaseKey(value) {
+  return String(value).replace(/[.#$/\[\]]/g, '_');
+}
+
 async function authMiddleware(req, res, next) {
   try {
     const username = req.header('X-User');
@@ -136,6 +170,7 @@ async function authMiddleware(req, res, next) {
     }
 
     req.user = user.username;
+    req.displayName = user.displayName;
     next();
   } catch (error) {
     return res.status(500).json({
@@ -626,6 +661,126 @@ app.post('/churrascos/:id/messages', async (req, res) => {
     });
   } catch (error) {
     console.error('Erro ao enviar mensagem de chat:', error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+app.post('/churrascos/:id/location', async (req, res) => {
+  try {
+    const { latitude, longitude } = req.body;
+    const sender = req.user;
+
+    if (!firebaseEnabled) {
+      return res.status(503).json({
+        success: false,
+        message: 'Localizacao indisponivel no momento',
+      });
+    }
+
+    if (
+      typeof latitude !== 'number' ||
+      typeof longitude !== 'number' ||
+      latitude < -90 ||
+      latitude > 90 ||
+      longitude < -180 ||
+      longitude > 180
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Localizacao invalida',
+      });
+    }
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID invalido',
+      });
+    }
+
+    const churrasco = await Churrasco.findById(req.params.id);
+
+    if (!churrasco) {
+      return res.status(404).json({
+        success: false,
+        message: 'Churrasco nao encontrado',
+      });
+    }
+
+    if (!locationSharingWindowIsOpen(churrasco)) {
+      return res.status(403).json({
+        success: false,
+        message: 'O mapa libera 1 hora antes do churrasco',
+      });
+    }
+
+    if (!participantCanShareLocation(churrasco, sender)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Confirme presenca antes de compartilhar localizacao',
+      });
+    }
+
+    const now = Date.now();
+    const location = {
+      username: sender,
+      displayName: req.displayName || sender,
+      latitude,
+      longitude,
+      updatedAt: now,
+      expiresAt: now + 2 * 60 * 60 * 1000,
+    };
+
+    await admin
+      .database()
+      .ref(`churrascos/${String(churrasco._id)}/locations/${safeFirebaseKey(sender)}`)
+      .set(location);
+
+    return res.json({
+      success: true,
+      message: 'Localizacao compartilhada',
+    });
+  } catch (error) {
+    console.error('Erro ao compartilhar localizacao:', error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+app.delete('/churrascos/:id/location', async (req, res) => {
+  try {
+    if (!firebaseEnabled) {
+      return res.status(503).json({
+        success: false,
+        message: 'Localizacao indisponivel no momento',
+      });
+    }
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID invalido',
+      });
+    }
+
+    await admin
+      .database()
+      .ref(`churrascos/${req.params.id}/locations/${safeFirebaseKey(req.user)}`)
+      .remove();
+
+    return res.json({
+      success: true,
+      message: 'Compartilhamento encerrado',
+    });
+  } catch (error) {
+    console.error('Erro ao encerrar localizacao:', error);
 
     return res.status(500).json({
       success: false,
