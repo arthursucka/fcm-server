@@ -677,7 +677,7 @@ app.post('/churrascos/:id/location', async (req, res) => {
     if (!firebaseEnabled) {
       return res.status(503).json({
         success: false,
-        message: 'Localizacao indisponivel no momento',
+        message: 'Localização indisponível no momento',
       });
     }
 
@@ -691,7 +691,7 @@ app.post('/churrascos/:id/location', async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: 'Localizacao invalida',
+        message: 'Localização inválida',
       });
     }
 
@@ -721,7 +721,7 @@ app.post('/churrascos/:id/location', async (req, res) => {
     if (!participantCanShareLocation(churrasco, sender)) {
       return res.status(403).json({
         success: false,
-        message: 'Confirme presenca antes de compartilhar localizacao',
+        message: 'Confirme presença antes de compartilhar localização',
       });
     }
 
@@ -742,10 +742,10 @@ app.post('/churrascos/:id/location', async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Localizacao compartilhada',
+      message: 'Localização compartilhada',
     });
   } catch (error) {
-    console.error('Erro ao compartilhar localizacao:', error);
+    console.error('Erro ao compartilhar localização:', error);
 
     return res.status(500).json({
       success: false,
@@ -759,7 +759,7 @@ app.delete('/churrascos/:id/location', async (req, res) => {
     if (!firebaseEnabled) {
       return res.status(503).json({
         success: false,
-        message: 'Localizacao indisponivel no momento',
+        message: 'Localização indisponível no momento',
       });
     }
 
@@ -780,7 +780,7 @@ app.delete('/churrascos/:id/location', async (req, res) => {
       message: 'Compartilhamento encerrado',
     });
   } catch (error) {
-    console.error('Erro ao encerrar localizacao:', error);
+    console.error('Erro ao encerrar localização:', error);
 
     return res.status(500).json({
       success: false,
