@@ -12,7 +12,7 @@ function fixture({ firebaseAvailable = true, failRevoke = false } = {}) {
     { username: 'outsider', displayName: 'Outsider', firebaseUid: 'uid-outsider', fcmTokens: [] },
     { username: 'legacy', displayName: 'Legacy', fcmTokens: [] },
   ];
-  let event = { _id: '507f1f77bcf86cd799439011', createdBy: 'owner', invitedUsers: ['guest'], guestsConfirmed: [], guestsDeclined: [], fornecidos: [], churrascoDate: '20/12/2026', hora: '12:00', local: 'Fixture' };
+  let event = { _id: '507f1f77bcf86cd799439011', createdBy: 'owner', invitedUsers: ['guest'], guestsConfirmed: [], guestsDeclined: [], fornecidos: [], organizerItems: [], __v: 0, churrascoDate: '20/12/2026', hora: '12:00', local: 'Fixture' };
   event.save = async () => {}; event.lean = async () => event;
   const matches = (row, query) => Object.entries(query).every(([key, value]) => {
     if (key === '$or') return value.some(q => matches(row, q));
@@ -36,6 +36,10 @@ function fixture({ firebaseAvailable = true, failRevoke = false } = {}) {
   };
   const Churrasco = {
     findById: () => event,
+    findOneAndUpdate: async (filter,update) => {
+      if(!event||!Object.entries(filter).every(([k,v])=>v && typeof v==='object' && '$exists' in v ? (event[k]!==undefined)===v.$exists : JSON.stringify(event[k])===JSON.stringify(v)))return null;
+      Object.assign(event,update.$set);event.__v=(event.__v||0)+update.$inc.__v;return event;
+    },
     find: (q = {}) => query(event && matches(event, q) ? [event] : []),
     findByIdAndDelete: async () => { event = null; },
     create: async row => { event = { ...event, ...row }; return event; },
@@ -65,6 +69,7 @@ function fixture({ firebaseAvailable = true, failRevoke = false } = {}) {
       if (name === 'mongoose') return mongoose;
       if (name === 'cors') return () => () => {};
       if (name === './firebase-services') return admin;
+      if (name === './item-reservations') return require('../item-reservations');
       if (name === './legacy-onboarding') return require('../legacy-onboarding');
       if (name === 'fs') return { existsSync: () => false, readFileSync: () => { throw Error('Credentials forbidden'); } };
       throw Error('Unexpected require: ' + name);

@@ -115,6 +115,7 @@ const churrascoSchema = new mongoose.Schema({
   hora: { type: String, required: true },
   local: { type: String, required: true },
   fornecidos: { type: [String], default: [] },
+  organizerItems: { type: [String], default: undefined },
   guestsConfirmed: [{ name: String, items: [String] }],
   guestsDeclined: { type: [String], default: [] },
   invitedUsers: { type: [String], default: [] },
@@ -133,6 +134,7 @@ function mapChurrasco(c) {
     createdBy: c.createdBy,
     invitedUsers: c.invitedUsers || [],
     fornecidosAgregados: c.fornecidos || [],
+    organizerItems: c.organizerItems,
     guestsConfirmed: c.guestsConfirmed || [],
     guestsDeclined: c.guestsDeclined || [],
   };
@@ -511,6 +513,7 @@ app.use('/churrascos', authMiddleware, (req, res, next) => {
   return next();
 });
 
+const reservations = require('./item-reservations')({Churrasco,canRespondToInvite,revoke:revokeReadAccess,grant:updateReadAccess});
 app.post('/churrascos', async (req, res) => {
   try {
     const { churrascoDate, hora, local, fornecidos, invitedUsers } = req.body;
@@ -532,7 +535,8 @@ app.post('/churrascos', async (req, res) => {
       churrascoDate,
       hora,
       local,
-      fornecidos,
+      fornecidos: require('./item-reservations').validateItems(fornecidos),
+      organizerItems: require('./item-reservations').validateItems(fornecidos),
       guestsConfirmed: [],
       guestsDeclined: [],
       invitedUsers,
@@ -558,7 +562,7 @@ app.post('/churrascos', async (req, res) => {
   } catch (error) {
     console.error('ERRO AO CRIAR CHURRASCO:', error);
 
-    return res.status(500).json({
+    return res.status(error.status || 500).json({
       success: false,
       message: error.message || 'Erro desconhecido',
     });
@@ -834,157 +838,16 @@ app.delete('/churrascos/:id/location', async (req, res) => {
   }
 });
 
-app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
+for (const [route, decline] of [['confirm-presenca',false],['decline-presenca',true]]) {
+ app.post(`/churrascos/:id/${route}`, async(req,res)=>{
   try {
-    const { selectedItems } = req.body;
-    const name = req.user;
-
-    if (!name || !Array.isArray(selectedItems)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payload invalido',
-      });
-    }
-
-    if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({
-        success: false,
-        message: 'ID invalido',
-      });
-    }
-
-    if (req.body.name != null && req.body.name !== req.user) {
-      return res.status(403).json({ success: false, message: 'Voce so pode responder por sua conta' });
-    }
-
-    const churrasco = await Churrasco.findById(req.params.id);
-
-    if (!churrasco) {
-      return res.status(404).json({
-        success: false,
-        message: 'Churrasco nao encontrado',
-      });
-    }
-
-    if (!canRespondToInvite(churrasco, req.user)) {
-      return res.status(403).json({ success: false, message: 'Voce nao foi convidado para este evento' });
-    }
-
-    const previousGuest = churrasco.guestsConfirmed.find(
-      (guest) => guest.name === name
-    );
-    const previousItems = previousGuest?.items || [];
-    const currentItemsFromOtherGuests = churrasco.guestsConfirmed
-      .filter((guest) => guest.name !== name)
-      .flatMap((guest) => guest.items || []);
-    const reservedItems = new Set([
-      ...churrasco.fornecidos.filter((item) => !previousItems.includes(item)),
-      ...currentItemsFromOtherGuests,
-    ]);
-    const duplicatedItems = selectedItems.filter((item) => reservedItems.has(item));
-
-    if (duplicatedItems.length) {
-      return res.status(409).json({
-        success: false,
-        message: `Item ja assumido: ${duplicatedItems.join(', ')}`,
-      });
-    }
-
-    churrasco.guestsConfirmed = churrasco.guestsConfirmed.filter(
-      (guest) => guest.name !== name
-    );
-
-    churrasco.guestsDeclined = churrasco.guestsDeclined.filter(
-      (guestName) => guestName !== name
-    );
-
-    churrasco.guestsConfirmed.push({
-      name,
-      items: selectedItems,
-    });
-
-    const mergedItems = new Set([
-      ...churrasco.fornecidos,
-      ...selectedItems,
-    ]);
-
-    churrasco.fornecidos = Array.from(mergedItems);
-
-    await churrasco.save();
-    await updateReadAccess(churrasco, req);
-
-    return res.json({
-      success: true,
-      message: 'Presenca confirmada',
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
-
-app.post('/churrascos/:id/decline-presenca', async (req, res) => {
-  try {
-    const name = req.user;
-
-    if (!name) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payload invalido',
-      });
-    }
-
-    if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({
-        success: false,
-        message: 'ID invalido',
-      });
-    }
-
-    if (req.body.name != null && req.body.name !== req.user) {
-      return res.status(403).json({ success: false, message: 'Voce so pode responder por sua conta' });
-    }
-
-    const churrasco = await Churrasco.findById(req.params.id);
-
-    if (!churrasco) {
-      return res.status(404).json({
-        success: false,
-        message: 'Churrasco nao encontrado',
-      });
-    }
-
-    if (!canRespondToInvite(churrasco, req.user)) {
-      return res.status(403).json({ success: false, message: 'Voce nao foi convidado para este evento' });
-    }
-
-    // Revoke first. If Mongo saving fails, access stays denied until a valid refresh.
-    if (churrasco.createdBy !== req.user) await revokeReadAccess(String(churrasco._id), req.authUid);
-
-    churrasco.guestsConfirmed = churrasco.guestsConfirmed.filter(
-      (guest) => guest.name !== name
-    );
-
-    if (!churrasco.guestsDeclined.includes(name)) {
-      churrasco.guestsDeclined.push(name);
-    }
-
-    await churrasco.save();
-
-    return res.json({
-      success: true,
-      message: 'Presenca recusada',
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
-
+   if(!mongoose.isValidObjectId(req.params.id))return res.status(400).json({success:false,message:'ID invalido'});
+   if(req.body.name!=null&&req.body.name!==req.user)return res.status(403).json({success:false,message:'Voce so pode responder por sua conta'});
+   await reservations.change({id:req.params.id,name:req.user,uid:req.authUid,selectedItems:req.body.selectedItems,decline,context:req});
+   return res.json({success:true,message:decline?'Presenca recusada':'Presenca confirmada'});
+  } catch(error){return res.status(error.status||500).json({success:false,message:error.status?error.message:'Nao foi possivel atualizar sua resposta. Tente novamente'});}
+ });
+}
 app.delete('/churrascos/:id', async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
