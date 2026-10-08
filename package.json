@@ -36,6 +36,6 @@
   },
   "homepage": "https://github.com/arthursucka/fcm-server#readme",
   "engines": {
-    "node": ">=22"
+    "node": "22.x"
   }
 }
