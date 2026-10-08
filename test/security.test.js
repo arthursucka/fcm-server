@@ -69,13 +69,15 @@ function fixture({ firebaseAvailable = true, failRevoke = false } = {}) {
       if (name === 'mongoose') return mongoose;
       if (name === 'cors') return () => () => {};
       if (name === './firebase-services') return admin;
+      if (name === './location-session-store') return require('../location-session-store');
+      if (name === './location-policy') return require('../location-policy');
       if (name === './item-reservations') return require('../item-reservations');
       if (name === './legacy-onboarding') return require('../legacy-onboarding');
       if (name === 'fs') return { existsSync: () => false, readFileSync: () => { throw Error('Credentials forbidden'); } };
       throw Error('Unexpected require: ' + name);
     },
     process: { env: { MONGO_URI: 'mongodb://fixture.invalid/test', ...(firebaseAvailable ? { SERVICE_ACCOUNT_KEY: '{}' } : {}) }, exit: () => { throw Error('Unexpected exit'); } },
-    Buffer, console: { log: () => {}, error: () => {}, warn: () => {} },
+    Buffer, setInterval:()=>({unref(){}}), console: { log: () => {}, error: () => {}, warn: () => {} },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8'), sandbox);
   async function request(method, route, { uid = 'uid-owner', authorization, body = {}, params = {}, headers = {} } = {}) {
@@ -196,3 +198,4 @@ test('messages require confirmed membership and derive sender from authenticatio
   assert.equal(response.statusCode, 200);
   assert.equal(f.writes.find(w => w.op === 'push').value.sender, 'guest');
 });
+

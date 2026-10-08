@@ -135,6 +135,8 @@ function mapChurrasco(c) {
     invitedUsers: c.invitedUsers || [],
     fornecidosAgregados: c.fornecidos || [],
     organizerItems: c.organizerItems,
+    timeZone: locationPolicy.ZONE,
+    eventStartsAt: parseEventDateTime(c.churrascoDate,c.hora)?.getTime() || null,
     guestsConfirmed: c.guestsConfirmed || [],
     guestsDeclined: c.guestsDeclined || [],
   };
@@ -148,27 +150,10 @@ function participantCanShareLocation(churrasco, username) {
   );
 }
 
-function locationSharingWindowIsOpen(churrasco) {
-  const eventTime = parseEventDateTime(churrasco.churrascoDate, churrasco.hora);
-  if (!eventTime) return true;
-
-  const now = Date.now();
-  const opensAt = eventTime.getTime() - 60 * 60 * 1000;
-  const closesAt = eventTime.getTime() + 4 * 60 * 60 * 1000;
-
-  return now >= opensAt && now <= closesAt;
-}
-
-function parseEventDateTime(date, time) {
-  const [day, month, year] = String(date).split('/').map(Number);
-  const [hour, minute] = String(time).split(':').map(Number);
-
-  if (![day, month, year, hour, minute].every(Number.isFinite)) {
-    return null;
-  }
-
-  return new Date(year, month - 1, day, hour, minute, 0, 0);
-}
+const locationPolicy = require('./location-policy');
+const locationTransaction = require('./location-session-store');
+const parseEventDateTime = locationPolicy.parseEventDateTime;
+const locationSharingWindowIsOpen = locationPolicy.isOpen;
 
 function safeFirebaseKey(value) {
   return String(value).replace(/[.#$/\[\]]/g, '_');
@@ -531,6 +516,7 @@ app.post('/churrascos', async (req, res) => {
       });
     }
 
+    if (!parseEventDateTime(churrascoDate, hora)) return res.status(400).json({success:false,message:'Informe data e hora válidas (dd/MM/aaaa e HH:mm), no horário de São Paulo'});
     const churrasco = await Churrasco.create({
       churrascoDate,
       hora,
@@ -718,6 +704,21 @@ app.post('/churrascos/:id/messages', async (req, res) => {
   }
 });
 
+app.post('/churrascos/:id/location-session', async (req,res) => {
+ try {
+  if(!firebaseEnabled) return res.status(503).json({success:false});
+  if(!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({success:false});
+  const event=await Churrasco.findById(req.params.id);
+  if(!event) return res.status(404).json({success:false});
+  if(!participantCanShareLocation(event,req.user)||!locationPolicy.isOpen(event))return res.status(403).json({success:false,message:'Compartilhamento indisponível nesta janela do evento'});
+  const fresh=locationPolicy.session(event,require('node:crypto').randomUUID());
+  const ref=admin.database().ref(`churrascos/${req.params.id}/locations/${req.authUid}`);
+  const result=await locationTransaction(ref,current=>current&&current.expiresAt>Date.now()?current:fresh);
+  const value=result.snapshot.val();
+  return res.json({success:true,sessionId:value.sessionId,expiresAt:value.expiresAt});
+ }catch(_){return res.status(503).json({success:false,message:'Não foi possível iniciar o compartilhamento'});}
+});
+
 app.post('/churrascos/:id/location', async (req, res) => {
   try {
     const { latitude, longitude } = req.body;
@@ -731,8 +732,8 @@ app.post('/churrascos/:id/location', async (req, res) => {
     }
 
     if (
-      typeof latitude !== 'number' ||
-      typeof longitude !== 'number' ||
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude) ||
       latitude < -90 ||
       latitude > 90 ||
       longitude < -180 ||
@@ -774,25 +775,15 @@ app.post('/churrascos/:id/location', async (req, res) => {
       });
     }
 
-    const now = Date.now();
-    const location = {
-      username: sender,
-      displayName: req.displayName || sender,
-      latitude,
-      longitude,
-      updatedAt: now,
-      expiresAt: now + 2 * 60 * 60 * 1000,
-    };
-
-    await admin
-      .database()
-      .ref(`churrascos/${String(churrasco._id)}/locations/${req.authUid}`)
-      .set(location);
-
-    return res.json({
-      success: true,
-      message: 'Localização compartilhada',
-    });
+    if(typeof req.body.sessionId!=='string') return res.status(400).json({success:false,message:'Atualize o aplicativo e inicie uma sessão de compartilhamento'});
+    const ref=admin.database().ref(`churrascos/${String(churrasco._id)}/locations/${req.authUid}`);
+    const result=await locationTransaction(ref,current=>{
+      if(!current)return undefined;
+      return locationPolicy.position(current,req.body.sessionId,{username:sender,displayName:req.displayName||sender,latitude,longitude}) || undefined;
+    },undefined,false);
+    const location=result.snapshot.val();
+    if(!result.committed||location?.sessionId!==req.body.sessionId||location?.latitude!==latitude) return res.status(410).json({success:false,message:'Compartilhamento encerrado. Toque novamente para iniciar outra sessão'});
+    return res.json({success:true,message:'Localização compartilhada',expiresAt:location.expiresAt});
   } catch (error) {
     console.error('Erro ao compartilhar localização:', error);
 
@@ -893,3 +884,25 @@ app.delete('/churrascos/:id', async (req, res) => {
 app.listen(PORT, localTest ? '127.0.0.1' : undefined, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
+
+// Strip expired coordinates while retaining the session deadline. An update
+// cannot restart it; only an explicit session request can start a new one.
+let expiringLocations=false;
+async function expireLocations(){
+ if(!firebaseEnabled||expiringLocations)return;
+ expiringLocations=true;
+ try{
+  const events=(await admin.database().ref('churrascos').get()).val()||{};
+  for(const [id,event] of Object.entries(events))for(const [uid,loc] of Object.entries(event.locations||{})){
+   if(loc.expiresAt<=Date.now()&&('latitude' in loc||'longitude' in loc)){
+    const ref=admin.database().ref(`churrascos/${id}/locations/${uid}`);
+    await locationTransaction(ref,current=>current?locationPolicy.expiredWithoutCoordinates(current):undefined);
+   }
+  }
+ }catch(_){console.error('Falha na limpeza de coordenadas expiradas');}finally{expiringLocations=false;}
+}
+const locationExpiryTimer=setInterval(expireLocations,localTest ? 1000 : 60000);locationExpiryTimer.unref();
+expireLocations();
+
+
+
