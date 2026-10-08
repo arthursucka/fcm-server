@@ -64,7 +64,7 @@ function fixture({ firebaseAvailable = true, failRevoke = false } = {}) {
       if (name === 'express') return express;
       if (name === 'mongoose') return mongoose;
       if (name === 'cors') return () => () => {};
-      if (name === 'firebase-admin') return admin;
+      if (name === './firebase-services') return admin;
       if (name === './legacy-onboarding') return require('../legacy-onboarding');
       if (name === 'fs') return { existsSync: () => false, readFileSync: () => { throw Error('Credentials forbidden'); } };
       throw Error('Unexpected require: ' + name);

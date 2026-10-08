@@ -4,7 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const admin = require('firebase-admin');
+const admin = require('./firebase-services');
 const fs = require('fs');
 
 const app = express();
