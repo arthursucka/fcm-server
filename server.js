@@ -23,10 +23,30 @@ if (!MONGO_URI) {
   process.exit(1);
 }
 
+// Explicit local rehearsal only. Never enable unsigned emulator tokens in production.
+const localTest = process.env.CHURRASCO_LOCAL_TEST === '1';
+if (localTest) {
+  const loopback = /^127\.0\.0\.1:[0-9]+$/;
+  if (!/^demo-[a-z0-9-]+$/.test(process.env.GCLOUD_PROJECT || '') ||
+      !loopback.test(process.env.FIREBASE_AUTH_EMULATOR_HOST || '') ||
+      !loopback.test(process.env.FIREBASE_DATABASE_EMULATOR_HOST || '') ||
+      !/^mongodb:\/\/127\.0\.0\.1:[0-9]+\/churrasco_test[a-z0-9_]*(?:\?.*)?$/.test(MONGO_URI) ||
+      FIREBASE_DATABASE_URL !== `http://${process.env.FIREBASE_DATABASE_EMULATOR_HOST}/?ns=${process.env.GCLOUD_PROJECT}`) {
+    throw new Error('Local test requires demo project and isolated loopback targets');
+  }
+} else if (process.env.FIREBASE_AUTH_EMULATOR_HOST || process.env.FIREBASE_DATABASE_EMULATOR_HOST) {
+  throw new Error('Emulator hosts require explicit isolated local test mode');
+}
+
 // Firebase Admin Init
 let firebaseEnabled = false;
 
 try {
+  if (localTest) {
+    admin.initializeApp({projectId: process.env.GCLOUD_PROJECT, databaseURL: FIREBASE_DATABASE_URL});
+    firebaseEnabled = true;
+    console.log('Firebase local demo initialized; notifications disabled');
+  } else {
   const serviceAccountJson = resolveServiceAccountJson();
 
   if (!serviceAccountJson) {
@@ -41,6 +61,7 @@ try {
 
     firebaseEnabled = true;
     console.log('Firebase Admin inicializado!');
+  }
   }
 } catch (error) {
   console.error('Erro ao inicializar Firebase Admin:', error);
@@ -83,6 +104,8 @@ const userSchema = new mongoose.Schema({
   username: { type: String, unique: true, required: true, trim: true },
   displayName: { type: String, required: true, trim: true },
   fcmTokens: { type: [String], default: [] },
+  firebaseUid: { type: String, unique: true, sparse: true },
+  legacyLinkStatus: { type: String, enum: ['pending_access', 'ready'] },
 });
 
 const User = mongoose.model('User', userSchema);
@@ -149,38 +172,66 @@ function safeFirebaseKey(value) {
   return String(value).replace(/[.#$/\[\]]/g, '_');
 }
 
-async function authMiddleware(req, res, next) {
+// A name/header/FCM token is not proof of identity. Legacy profiles require
+// an explicit, reviewed UID binding; registration must never claim them.
+async function authenticateFirebase(req, res, next) {
+  const authorization = req.header('Authorization') || '';
+  const match = /^Bearer ([^\s]+)$/i.exec(authorization);
+  if (!match) return res.status(401).json({ success: false, message: 'Entre na sua conta para continuar' });
+  if (!firebaseEnabled) return res.status(503).json({ success: false, message: 'Autenticacao indisponivel' });
   try {
-    const username = req.header('X-User');
-
-    if (!username) {
-      return res.status(401).json({
-        success: false,
-        message: 'Nao autorizado',
-      });
-    }
-
-    const user = await User.findOne({ username });
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Usuario invalido',
-      });
-    }
-
-    req.user = user.username;
-    req.displayName = user.displayName;
-    next();
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    const token = await admin.auth().verifyIdToken(match[1], true);
+    if (typeof token.uid !== 'string' || !token.uid || token.uid.length > 128 || /[.#$\[\]/\u0000-\u001f\u007f]/.test(token.uid)) throw new Error('Invalid UID');
+    req.authUid = token.uid;
+  } catch (_) {
+    return res.status(401).json({ success: false, message: 'Sessao invalida ou expirada' });
   }
+  return next();
+}
+
+async function authMiddleware(req, res, next) {
+  return authenticateFirebase(req, res, async () => {
+    try {
+      const user = await User.findOne({ firebaseUid: req.authUid });
+      if (!user) return res.status(403).json({ success: false, message: 'Complete seu cadastro ou solicite a migracao da conta antiga' });
+      if (user.legacyLinkStatus === 'pending_access') return res.status(403).json({ success: false, message: 'Sua vinculacao esta sendo concluida. Aguarde e consulte a solicitacao.' });
+      req.user = user.username;
+      req.displayName = user.displayName;
+      req.profile = user;
+      return next();
+    } catch (_) {
+      return res.status(503).json({ success: false, message: 'Nao foi possivel validar seu cadastro' });
+    }
+  });
+}
+
+function canReadEvent(churrasco, username) {
+  return churrasco.createdBy === username ||
+    (churrasco.invitedUsers || []).includes(username) ||
+    (churrasco.guestsConfirmed || []).some(guest => guest.name === username);
+}
+
+function canRespondToInvite(churrasco, username) {
+  return churrasco.createdBy === username || (churrasco.invitedUsers || []).includes(username);
+}
+
+async function updateReadAccess(churrasco, req) {
+  const ref = admin.database().ref(`eventAccess/${String(churrasco._id)}/${req.authUid}`);
+  if (participantCanShareLocation(churrasco, req.user)) await ref.set(true);
+  else await ref.remove();
+}
+
+async function revokeReadAccess(id, uid) {
+  await admin.database().ref(`eventAccess/${id}/${uid}`).remove();
+  await admin.database().ref(`churrascos/${id}/locations/${uid}`).remove();
+}
+
+function publicProfile(user) {
+  return { username: user.username, displayName: user.displayName };
 }
 
 async function sendInviteNotifications(churrasco, tokens) {
+  if (localTest) return;
   if (!firebaseEnabled) {
     console.warn('Firebase desativado. Convites criados sem notificacao.');
     return;
@@ -215,7 +266,6 @@ async function sendInviteNotifications(churrasco, tokens) {
       const code = result.reason?.errorInfo?.code || result.reason?.code;
 
       console.error('Erro ao enviar FCM:', {
-        token,
         code,
         message: result.reason?.message,
       });
@@ -241,6 +291,7 @@ async function sendInviteNotifications(churrasco, tokens) {
 }
 
 async function sendChatNotifications(churrasco, sender, text) {
+  if (localTest) return;
   if (!firebaseEnabled) {
     console.warn('Firebase desativado. Mensagem salva sem notificacao.');
     return;
@@ -301,7 +352,6 @@ async function sendChatNotifications(churrasco, sender, text) {
       const code = result.reason?.errorInfo?.code || result.reason?.code;
 
       console.error('Erro ao enviar FCM de chat:', {
-        token,
         code,
         message: result.reason?.message,
       });
@@ -343,82 +393,65 @@ app.get('/health', (req, res) => {
 });
 
 // Rotas de usuario
-app.post('/users/register', async (req, res) => {
+const legacyOnboarding = require('./legacy-onboarding')({app, mongoose, User, Churrasco, admin, authenticateFirebase, env: process.env});
+app.post('/users/register', authenticateFirebase, async (req, res) => {
   try {
+    await legacyOnboarding.ready();
+    const identity = await admin.auth().getUser(req.authUid);
+    if (!identity.emailVerified || !identity.email || identity.disabled) return res.status(403).json({success:false,message:'Confirme seu e-mail antes de concluir o cadastro'});
     const { username, displayName } = req.body;
-
-    if (!username || !displayName) {
-      return res.status(400).json({
-        success: false,
-        message: 'Dados incompletos',
-      });
+    if (typeof username !== 'string' || typeof displayName !== 'string' ||
+        !username.trim() || !displayName.trim() || username.trim().length > 60 || displayName.trim().length > 60) {
+      return res.status(400).json({ success: false, message: 'Informe um nome de ate 60 caracteres' });
     }
-
-    await User.create({
-      username: username.trim(),
-      displayName: displayName.trim(),
-    });
-
-    return res.json({ success: true });
+    const current = await User.findOne({ firebaseUid: req.authUid });
+    if (current) return res.json({ success: true, payload: publicProfile(current) });
+    if (await legacyOnboarding.hasActiveRequest(req.authUid)) return res.status(409).json({success:false,message:'Voce ja solicitou a recuperacao de uma conta antiga. Aguarde a revisao antes de criar outro perfil'});
+    const existing = await User.findOne({ username: username.trim() });
+    if (existing) return res.status(409).json({ success: false, message: 'Nome ja reservado. Contas antigas precisam de migracao assistida; escolha outro nome para uma conta nova.' });
+    const user = await User.create({ username: username.trim(), displayName: displayName.trim(), firebaseUid: req.authUid });
+    return res.status(201).json({ success: true, payload: publicProfile(user) });
   } catch (error) {
-    if (error.code === 11000) {
-      return res.json({ success: true });
-    }
-
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    if (error.code === 11000) return res.status(409).json({ success: false, message: 'Cadastro ja existente; entre novamente' });
+    return res.status(500).json({ success: false, message: 'Nao foi possivel concluir o cadastro' });
   }
 });
 
-app.post('/users/login', async (req, res) => {
+app.post('/users/login', authMiddleware, async (req, res) => {
   try {
-    const { username, fcmToken } = req.body;
-
-    if (!username || !fcmToken) {
-      return res.status(400).json({
-        success: false,
-        message: 'Dados incompletos',
-      });
+    const { fcmToken } = req.body;
+    if (fcmToken != null && (typeof fcmToken !== 'string' || !fcmToken.trim() || fcmToken.length > 4096)) {
+      return res.status(400).json({ success: false, message: 'Token de notificacao invalido' });
     }
-
-    const user = await User.findOne({ username: username.trim() });
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario nao encontrado',
-      });
+    if (fcmToken) {
+      // Moving an installation to a different account cannot retain its old push recipients.
+      await User.updateMany({ firebaseUid: { $ne: req.authUid }, fcmTokens: fcmToken }, { $pull: { fcmTokens: fcmToken } });
+      await User.updateOne({ firebaseUid: req.authUid }, { $addToSet: { fcmTokens: fcmToken } });
     }
-
-    if (!user.fcmTokens.includes(fcmToken)) {
-      user.fcmTokens.push(fcmToken);
-      await user.save();
-    }
-
-    return res.json({ success: true });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    return res.json({ success: true, payload: publicProfile(req.profile) });
+  } catch (_) {
+    return res.status(500).json({ success: false, message: 'Nao foi possivel abrir a sessao' });
   }
 });
 
-app.get('/users/:username', async (req, res) => {
+app.post('/users/logout', authMiddleware, async (req, res) => {
+  try {
+    const { fcmToken } = req.body;
+    if (typeof fcmToken === 'string' && fcmToken.length <= 4096) {
+      await User.updateOne({ firebaseUid: req.authUid }, { $pull: { fcmTokens: fcmToken } });
+    }
+    return res.json({ success: true });
+  } catch (_) {
+    return res.status(500).json({ success: false, message: 'Nao foi possivel desvincular as notificacoes' });
+  }
+});
+
+app.get('/users/:username', authMiddleware, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.params.username });
-
-    return res.json({
-      success: true,
-      exists: !!user,
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    return res.json({ success: true, exists: !!user });
+  } catch (_) {
+    return res.status(500).json({ success: false, message: 'Nao foi possivel consultar o cadastro' });
   }
 });
 
@@ -473,7 +506,10 @@ app.get('/users/:username/invites', authMiddleware, async (req, res) => {
 });
 
 // Rotas de churrasco
-app.use('/churrascos', authMiddleware);
+app.use('/churrascos', authMiddleware, (req, res, next) => {
+  if (process.env.CHURRASCO_LEGACY_MIGRATION_WINDOW === '1' && req.method !== 'GET') return res.status(503).json({success:false,message:'Estamos recuperando as contas antigas. Alteracoes em churrascos ficam pausadas durante esta etapa.'});
+  return next();
+});
 
 app.post('/churrascos', async (req, res) => {
   try {
@@ -502,6 +538,8 @@ app.post('/churrascos', async (req, res) => {
       invitedUsers,
       createdBy: req.user,
     });
+
+    await updateReadAccess(churrasco, req);
 
     const users = await User.find({
       username: { $in: invitedUsers },
@@ -532,7 +570,9 @@ app.get('/churrascos', async (req, res) => {
     const status = req.query.status;
     const now = new Date();
 
-    const churrascos = await Churrasco.find().lean();
+    const churrascos = await Churrasco.find({ $or: [
+      { createdBy: req.user }, { invitedUsers: req.user }, { 'guestsConfirmed.name': req.user },
+    ] }).lean();
 
     const filtered = churrascos.filter((c) => {
       const [day, month, year] = c.churrascoDate.split('/').map(Number);
@@ -575,6 +615,11 @@ app.get('/churrascos/:id', async (req, res) => {
       });
     }
 
+    if (!canReadEvent(churrasco, req.user)) {
+      return res.status(403).json({ success: false, message: 'Voce nao participa deste evento' });
+    }
+    // Reads must not recreate revoked Firebase access from a stale Mongo snapshot.
+
     return res.json({
       success: true,
       churrasco: mapChurrasco(churrasco),
@@ -599,7 +644,7 @@ app.post('/churrascos/:id/messages', async (req, res) => {
       });
     }
 
-    if (!text || !text.trim()) {
+    if (typeof text !== 'string' || !text.trim() || text.trim().length > 500) {
       return res.status(400).json({
         success: false,
         message: 'Mensagem vazia',
@@ -737,7 +782,7 @@ app.post('/churrascos/:id/location', async (req, res) => {
 
     await admin
       .database()
-      .ref(`churrascos/${String(churrasco._id)}/locations/${safeFirebaseKey(sender)}`)
+      .ref(`churrascos/${String(churrasco._id)}/locations/${req.authUid}`)
       .set(location);
 
     return res.json({
@@ -772,7 +817,7 @@ app.delete('/churrascos/:id/location', async (req, res) => {
 
     await admin
       .database()
-      .ref(`churrascos/${req.params.id}/locations/${safeFirebaseKey(req.user)}`)
+      .ref(`churrascos/${req.params.id}/locations/${req.authUid}`)
       .remove();
 
     return res.json({
@@ -791,7 +836,8 @@ app.delete('/churrascos/:id/location', async (req, res) => {
 
 app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
   try {
-    const { name, selectedItems } = req.body;
+    const { selectedItems } = req.body;
+    const name = req.user;
 
     if (!name || !Array.isArray(selectedItems)) {
       return res.status(400).json({
@@ -807,6 +853,10 @@ app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
       });
     }
 
+    if (req.body.name != null && req.body.name !== req.user) {
+      return res.status(403).json({ success: false, message: 'Voce so pode responder por sua conta' });
+    }
+
     const churrasco = await Churrasco.findById(req.params.id);
 
     if (!churrasco) {
@@ -814,6 +864,10 @@ app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
         success: false,
         message: 'Churrasco nao encontrado',
       });
+    }
+
+    if (!canRespondToInvite(churrasco, req.user)) {
+      return res.status(403).json({ success: false, message: 'Voce nao foi convidado para este evento' });
     }
 
     const previousGuest = churrasco.guestsConfirmed.find(
@@ -857,6 +911,7 @@ app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
     churrasco.fornecidos = Array.from(mergedItems);
 
     await churrasco.save();
+    await updateReadAccess(churrasco, req);
 
     return res.json({
       success: true,
@@ -872,7 +927,7 @@ app.post('/churrascos/:id/confirm-presenca', async (req, res) => {
 
 app.post('/churrascos/:id/decline-presenca', async (req, res) => {
   try {
-    const { name } = req.body;
+    const name = req.user;
 
     if (!name) {
       return res.status(400).json({
@@ -888,6 +943,10 @@ app.post('/churrascos/:id/decline-presenca', async (req, res) => {
       });
     }
 
+    if (req.body.name != null && req.body.name !== req.user) {
+      return res.status(403).json({ success: false, message: 'Voce so pode responder por sua conta' });
+    }
+
     const churrasco = await Churrasco.findById(req.params.id);
 
     if (!churrasco) {
@@ -896,6 +955,13 @@ app.post('/churrascos/:id/decline-presenca', async (req, res) => {
         message: 'Churrasco nao encontrado',
       });
     }
+
+    if (!canRespondToInvite(churrasco, req.user)) {
+      return res.status(403).json({ success: false, message: 'Voce nao foi convidado para este evento' });
+    }
+
+    // Revoke first. If Mongo saving fails, access stays denied until a valid refresh.
+    if (churrasco.createdBy !== req.user) await revokeReadAccess(String(churrasco._id), req.authUid);
 
     churrasco.guestsConfirmed = churrasco.guestsConfirmed.filter(
       (guest) => guest.name !== name
@@ -944,6 +1010,9 @@ app.delete('/churrascos/:id', async (req, res) => {
       });
     }
 
+    // Revoke Firebase reads before removing the Mongo event.
+    await admin.database().ref(`eventAccess/${req.params.id}`).remove();
+    await admin.database().ref(`churrascos/${req.params.id}`).remove();
     await Churrasco.findByIdAndDelete(req.params.id);
 
     return res.json({
@@ -958,6 +1027,6 @@ app.delete('/churrascos/:id', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, localTest ? '127.0.0.1' : undefined, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
