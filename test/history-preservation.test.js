@@ -2,6 +2,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const crypto=require('node:crypto');
 const fs=require('node:fs');
+const os=require('node:os');
 const path=require('node:path');
 const {sealHistory,openHistory,inventoryHistory,saveHistory}=require('../scripts/preserve-history');
 function fixture(){return {format:'churrasco-history',version:1,mongo:{databaseName:'fixture',collections:[
@@ -31,7 +32,7 @@ test('key cannot be saved beside encrypted deliverable',()=>{
  assert.throws(()=>saveHistory(fixture(),{destination:'C:/fictional/delivery',keyFile:'C:/fictional/delivery/key.bin'}),/KEY_MUST_BE_STORED_SEPARATELY/);
 });
 test('saving backup refuses existing key without overwriting it',()=>{
- const work='C:/Users/arthu/Documents/Codex/2026-10-07/https-www-youtube-com-watch-v/work';
+ const work=os.tmpdir();
  const temp=fs.mkdtempSync(path.join(work,'history-test-')),key=path.join(temp,'key.bin');fs.writeFileSync(key,'protected-fixture');
  assert.throws(()=>saveHistory(fixture(),{destination:path.join(temp,'delivery'),keyFile:key}),/DESTINATION_ALREADY_EXISTS/);
  assert.equal(fs.readFileSync(key,'utf8'),'protected-fixture');
