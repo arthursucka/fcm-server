@@ -37,5 +37,8 @@
   "homepage": "https://github.com/arthursucka/fcm-server#readme",
   "engines": {
     "node": "22.x"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^10.4.3"
   }
 }

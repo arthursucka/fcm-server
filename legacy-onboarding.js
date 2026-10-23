@@ -1,6 +1,6 @@
 'use strict';
 // Authenticated, reviewed legacy onboarding. Never infer ownership from a name.
-module.exports=function mountLegacyOnboarding({app,mongoose,User,Churrasco,admin,authenticateFirebase,env}){
+module.exports=function mountLegacyOnboarding({app,mongoose,User,Churrasco,admin,authenticateFirebase,env,syncReadAccess}){
  const schema=new mongoose.Schema({firebaseUid:{type:String,unique:true,required:true},username:{type:String,required:true},email:{type:String,required:true},status:{type:String,enum:['pending','activating','approved','rejected'],required:true},createdAt:{type:Date,default:Date.now},updatedAt:{type:Date,default:Date.now},reviewerUid:String,evidenceReference:String,reason:String,decisions:{type:[{action:String,reviewerUid:String,reference:String,at:Date}],default:[]}});
  const Request=mongoose.model('LegacyLinkRequest',schema);
  let indexesFailed=false;const initialization=Promise.all([User.init(),Request.init()]).catch(()=>{indexesFailed=true;});
@@ -54,8 +54,13 @@ module.exports=function mountLegacyOnboarding({app,mongoose,User,Churrasco,admin
    }
    const linked=await User.findOne({username:request.username,firebaseUid:request.firebaseUid});if(!linked)throw Error('CONFLICT');
    // During this explicit window all app event writes are blocked. Other UIDs are preserved.
-   const events=await Churrasco.find({$or:[{createdBy:request.username},{'guestsConfirmed.name':request.username},{invitedUsers:request.username}]}).lean();
-   for(const event of events){const eligible=event.createdBy===request.username||(event.guestsConfirmed||[]).some(g=>g.name===request.username);const ref=admin.database().ref(`eventAccess/${event._id}/${request.firebaseUid}`);if(eligible)await ref.set(true);else await ref.remove();}
+   // v2: os eventos guardam o nome antigo em legacyUsername até a conta ser vinculada; agora ganham o UID.
+   const name=request.username,uid=request.firebaseUid;
+   await Churrasco.updateMany({organizerLegacyUsername:name,organizerUid:null},{$set:{organizerUid:uid,organizerLegacyUsername:null}});
+   await Churrasco.updateMany({'participants.legacyUsername':name},{$set:{'participants.$[p].uid':uid,'participants.$[p].legacyUsername':null}},{arrayFilters:[{'p.legacyUsername':name}]});
+   await Churrasco.updateMany({'contributions.legacyUsername':name},{$set:{'contributions.$[c].uid':uid,'contributions.$[c].legacyUsername':null}},{arrayFilters:[{'c.legacyUsername':name}]});
+   const events=await Churrasco.find({$or:[{organizerUid:uid},{'participants.uid':uid}]}).lean();
+   for(const event of events)await syncReadAccess(event);
    const readyResult=await User.updateOne({username:request.username,firebaseUid:request.firebaseUid},{$set:{legacyLinkStatus:'ready'}});
    if(readyResult.matchedCount!==1)throw Error('CONFLICT');
    request=await Request.findOneAndUpdate({_id:request._id,status:'activating'},{$set:{status:'approved',updatedAt:new Date()}},{new:true});
