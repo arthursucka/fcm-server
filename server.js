@@ -558,22 +558,18 @@ app.post('/churrascos', async (req, res) => {
 app.get('/churrascos', async (req, res) => {
   try {
     const status = req.query.status;
-    const now = new Date();
+    const now = Date.now();
 
     const churrascos = await Churrasco.find({ $or: [
       { createdBy: req.user }, { invitedUsers: req.user }, { 'guestsConfirmed.name': req.user },
     ] }).lean();
 
-    const filtered = churrascos.filter((c) => {
-      const [day, month, year] = c.churrascoDate.split('/').map(Number);
-      const [hour, minute] = c.hora.split(':').map(Number);
-      const eventDate = new Date(year, month - 1, day, hour, minute);
-
-      if (status === 'active') return eventDate >= now;
-      if (status === 'past') return eventDate < now;
-
-      return true;
-    });
+    // Sempre no horário de São Paulo: o servidor roda em UTC.
+    const filtered = churrascos.filter((c) =>
+      status === 'active' || status === 'past'
+        ? locationPolicy.eventStatus(c, now) === status
+        : true
+    );
 
     return res.json({
       success: true,

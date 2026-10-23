@@ -11,6 +11,8 @@ function parseEventDateTime(date,time){
  for(let n=0;n<3;n++){const p=Object.fromEntries(formatter.formatToParts(instant).map(p=>[p.type,p.value]));const shown=Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute);instant+=wall-shown;}
  return new Date(instant);
 }
+// 'active' | 'past' pelo horário de São Paulo; null se a data do evento for inválida.
+function eventStatus(event,now=Date.now()){const d=parseEventDateTime(event?.churrascoDate,event?.hora);return d?(+d>=now?'active':'past'):null;}
 function windowFor(event){const d=parseEventDateTime(event.churrascoDate,event.hora);return d?{opensAt:+d-HOUR,closesAt:+d+4*HOUR}:null;}
 function isOpen(event,now=Date.now()){const w=windowFor(event);return !!w&&now>=w.opensAt&&now<w.closesAt;}
 function session(event,id,now=Date.now()){const w=windowFor(event);if(!w||!isOpen(event,now))return null;return {sessionId:id,startedAt:now,expiresAt:Math.min(now+2*HOUR,w.closesAt)};}
@@ -22,4 +24,4 @@ function expiredWithoutCoordinates(current,now=Date.now()){
  if(!current||!(current.expiresAt<=now))return current;
  return {sessionId:current.sessionId||null,startedAt:current.startedAt||null,expiresAt:current.expiresAt};
 }
-module.exports={ZONE,HOUR,parseEventDateTime,windowFor,isOpen,session,position,expiredWithoutCoordinates};
+module.exports={ZONE,HOUR,parseEventDateTime,eventStatus,windowFor,isOpen,session,position,expiredWithoutCoordinates};
