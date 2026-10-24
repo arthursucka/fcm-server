@@ -17,7 +17,7 @@ const get = async (id, as) => (await t.request('GET', `/churrascos/${id}`, { as 
 test('versão antiga do app recebe 426 com instrução para atualizar', async () => {
   const noHeader = await t.request('GET', '/churrascos', { version: null });
   assert.equal(noHeader.status, 426);
-  assert.match(noHeader.body.message, /Atualize o app/);
+  assert.match(noHeader.body.message, /Atualize o Manda Churras/);
   assert.equal((await t.request('GET', '/churrascos', { version: 20 })).status, 426);
   assert.equal((await t.request('GET', '/health', { version: null })).status, 200);
 });
@@ -139,6 +139,8 @@ test('link de convite: página pública, App Link e aceite por quem não era ami
   const page = await t.request('GET', `/convite/${link.token}`, { version: null });
   assert.equal(page.status, 200);
   assert.match(page.text, /Churrasco de Marina/);
+  assert.match(page.text, /Baixar o Manda Churras/);
+  assert.match(page.text, /<svg class="logo"/);
   assert.doesNotMatch(page.text, /Rua A/); // a página pública não mostra o endereço
   const assetlinks = await t.request('GET', '/.well-known/assetlinks.json', { version: null });
   assert.equal(assetlinks.body[0].target.package_name, 'com.longynus.churrasco');
